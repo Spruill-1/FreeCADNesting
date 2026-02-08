@@ -51,6 +51,9 @@ from CAMTests.TestPathHelpers import TestPathHelpers
 from CAMTests.TestPathHelix import TestPathHelix
 from CAMTests.TestPathHelixGenerator import TestPathHelixGenerator
 from CAMTests.TestPathLog import TestPathLog
+from CAMTests.TestPathNesting import TestNestingGeometry
+from CAMTests.TestPathNesting import TestNestingPacker
+from CAMTests.TestPathNesting import TestNestingModels
 from CAMTests.TestPathOpUtil import TestPathOpUtil
 
 # from CAMTests.TestPathPost import TestPathPost
