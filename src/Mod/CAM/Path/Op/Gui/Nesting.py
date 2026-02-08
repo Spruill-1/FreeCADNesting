@@ -130,6 +130,22 @@ class NestingTaskPanel:
         form_pack.addRow(translate("CAM_Nesting", "Gap:"), self.spinGap)
         self.spinGap.valueChanged.connect(self._onSettingChanged)
 
+        self.spinEdgeMargin = QtGui.QDoubleSpinBox()
+        self.spinEdgeMargin.setRange(0.0, 1000.0)
+        self.spinEdgeMargin.setValue(1.0)
+        self.spinEdgeMargin.setSuffix(" mm")
+        self.spinEdgeMargin.setDecimals(2)
+        self.spinEdgeMargin.setToolTip(
+            translate(
+                "CAM_Nesting",
+                "Minimum distance between parts and the stock edge",
+            )
+        )
+        form_pack.addRow(
+            translate("CAM_Nesting", "Edge margin:"), self.spinEdgeMargin
+        )
+        self.spinEdgeMargin.valueChanged.connect(self._onSettingChanged)
+
         layout.addWidget(grp_packing)
 
         # --- Rotation parameters ------------------------------------------
@@ -179,7 +195,7 @@ class NestingTaskPanel:
         self.comboBias = QtGui.QComboBox()
         for label in PathNesting.PackingBias.LABELS:
             self.comboBias.addItem(translate("CAM_Nesting", label))
-        self.comboBias.setCurrentIndex(0)  # BottomLeft
+        self.comboBias.setCurrentIndex(0)  # Front
         self.comboBias.setToolTip(
             translate(
                 "CAM_Nesting",
@@ -259,8 +275,8 @@ class NestingTaskPanel:
             clone = PathJob.createModelResourceClone(self.job, body)
             self.job.Model.addObject(clone)
             self._new_clone_map[body.Name] = clone.Name
-            FreeCAD.Console.PrintMessage(
-                "  added clone '%s' for body '%s'\n"
+            Path.Log.debug(
+                "  added clone '%s' for body '%s'"
                 % (clone.Label, body.Label)
             )
         # Clear so they aren't added again on subsequent previews.
@@ -295,6 +311,7 @@ class NestingTaskPanel:
                 rotation_step=self.spinRotStep.value(),
                 bias=bias,
                 gravity_point=gravity_point,
+                edge_margin=self.spinEdgeMargin.value(),
             )
             FreeCAD.Console.PrintMessage(report + "\n")
         except Exception as e:

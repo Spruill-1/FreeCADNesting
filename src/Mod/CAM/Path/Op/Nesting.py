@@ -63,8 +63,13 @@ _EPS = 1e-9
 class PackingBias:
     """Supported directional bias modes for the nesting packer.
 
-    Corner modes (``BottomLeft``, ``BottomRight``, ``TopLeft``, ``TopRight``)
-    use coordinate mirroring so parts cluster against the chosen corner.
+    Direction modes (``Front``, ``Back``, ``Left``, ``Right``) correspond
+    to the FreeCAD navigation cube when viewed from above (top-down XY):
+
+      * **Front** — cluster toward −Y (toward the viewer)
+      * **Back**  — cluster toward +Y (away from the viewer)
+      * **Left**  — cluster toward −X
+      * **Right** — cluster toward +X
 
     ``Center`` attracts parts towards the centre of the stock.
 
@@ -72,44 +77,35 @@ class PackingBias:
     supplied by the caller.
     """
 
-    BottomLeft = "BottomLeft"
-    BottomRight = "BottomRight"
-    TopLeft = "TopLeft"
-    TopRight = "TopRight"
+    Front = "Front"
+    Back = "Back"
+    Left = "Left"
+    Right = "Right"
     Center = "Center"
     CustomPoint = "CustomPoint"
 
     ALL = [
-        BottomLeft,
-        BottomRight,
-        TopLeft,
-        TopRight,
+        Front,
+        Back,
+        Left,
+        Right,
         Center,
         CustomPoint,
     ]
 
     # Labels shown in the GUI combo-box (same order as ALL).
     LABELS = [
-        QT_TRANSLATE_NOOP("CAM_Nesting", "Bottom-Left"),
-        QT_TRANSLATE_NOOP("CAM_Nesting", "Bottom-Right"),
-        QT_TRANSLATE_NOOP("CAM_Nesting", "Top-Left"),
-        QT_TRANSLATE_NOOP("CAM_Nesting", "Top-Right"),
+        QT_TRANSLATE_NOOP("CAM_Nesting", "Front"),
+        QT_TRANSLATE_NOOP("CAM_Nesting", "Back"),
+        QT_TRANSLATE_NOOP("CAM_Nesting", "Left"),
+        QT_TRANSLATE_NOOP("CAM_Nesting", "Right"),
         QT_TRANSLATE_NOOP("CAM_Nesting", "Center"),
         QT_TRANSLATE_NOOP("CAM_Nesting", "Custom Point"),
     ]
 
     @classmethod
-    def isCorner(cls, bias):
-        return bias in (cls.BottomLeft, cls.BottomRight,
-                        cls.TopLeft, cls.TopRight)
-
-    @classmethod
-    def needsMirrorX(cls, bias):
-        return bias in (cls.BottomRight, cls.TopRight)
-
-    @classmethod
-    def needsMirrorY(cls, bias):
-        return bias in (cls.TopLeft, cls.TopRight)
+    def isDirection(cls, bias):
+        return bias in (cls.Front, cls.Back, cls.Left, cls.Right)
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +596,7 @@ class NFPPacker:
         spacing=0.0,
         allow_rotation=True,
         rotation_step=90.0,
-        bias=PackingBias.BottomLeft,
+        bias=PackingBias.Front,
         gravity_point=None,
     ):
         self.stock_width = stock_width
@@ -611,16 +607,11 @@ class NFPPacker:
         self.bias = bias
         self._placed_polys = []  # list of translated+rotated offset polys
 
-        # Pre-compute gravity target in internal coords (always BL).
+        # Pre-compute gravity target.
         if bias == PackingBias.Center:
             self._gravity = (stock_width / 2.0, stock_height / 2.0)
         elif bias == PackingBias.CustomPoint and gravity_point is not None:
-            gx, gy = gravity_point
-            if PackingBias.needsMirrorX(bias):
-                gx = stock_width - gx
-            if PackingBias.needsMirrorY(bias):
-                gy = stock_height - gy
-            self._gravity = (gx, gy)
+            self._gravity = (float(gravity_point[0]), float(gravity_point[1]))
         else:
             self._gravity = None
 
@@ -651,20 +642,9 @@ class NFPPacker:
         indexed = sorted(range(len(outlines)), key=lambda i: -areas[i])
 
         results = [None] * len(outlines)
-        mirror_x = PackingBias.needsMirrorX(self.bias)
-        mirror_y = PackingBias.needsMirrorY(self.bias)
 
         for orig_idx in indexed:
             base_poly = outlines[orig_idx]
-
-            # If mirroring, reflect the part outline so we pack in a
-            # mirrored coordinate system (BL-fill in mirrored space →
-            # effectively a BR / TL / TR fill in real space).
-            if mirror_x or mirror_y:
-                base_poly = _mirror_polygon(
-                    base_poly, mirror_x, mirror_y,
-                    self.stock_width, self.stock_height,
-                )
 
             best = self._find_best_placement(base_poly, orig_idx)
             if best is None:
@@ -672,48 +652,8 @@ class NFPPacker:
 
             px, py, angle, placed_poly = best
 
-            # Un-mirror the final position back to real coordinates.
-            if mirror_x or mirror_y:
-                bb = _polygon_bounds(placed_poly)
-                cx = (bb[0] + bb[2]) / 2.0
-                cy = (bb[1] + bb[3]) / 2.0
-                if mirror_x:
-                    px = self.stock_width - px
-                    # Also need to recalc placed_poly in real coords for
-                    # future NFP computation — but we store everything in
-                    # internal (mirrored) coords, so skip.
-                if mirror_y:
-                    py = self.stock_height - py
-
-                # We need the placed polygon in *internal* coordinates
-                # for future NFP computations, so add it as-is.
-
             self._placed_polys.append(placed_poly)
             results[orig_idx] = (px, py, angle)
-
-        # --- Un-mirror results for corner biases --------------------------
-        if mirror_x or mirror_y:
-            for i in range(len(results)):
-                if results[i] is None:
-                    continue
-                px, py, angle = results[i]
-                # The px, py we stored already have mirror applied.
-                # Actually, let's redo this cleanly: we packed in mirrored
-                # space; the placed_poly coords are mirrored. We need to
-                # report real-space translation.
-                #
-                # In mirrored space the part at angle was placed so that
-                # poly at reference-point (0,0) rotated by angle then
-                # translated by (internal_x, internal_y) sits inside
-                # [0,W]x[0,H].
-                #
-                # In real space with X-mirror: real_x = W - internal_x,
-                # and the part is rotated by -angle (or 360-angle) and
-                # reflected, which is the same as rotating by (180-angle).
-                # But we also mirrored the input outline, so the net
-                # rotation difference cancels out if we think of it as:
-                # real position = mirror of internal position.
-                results[i] = (px, py, angle)
 
         # --- Center / CustomPoint: shift entire cluster -------------------
         if self._gravity is not None:
@@ -843,17 +783,32 @@ class NFPPacker:
     def _placement_score(self, px, py, rotated_poly):
         """Score a candidate position — lower is better.
 
-        For corner biases (BottomLeft default): minimise Y first, then X.
-        For Center / CustomPoint: minimise distance to the gravity target
-        first, with Y as a light tie-breaker so packing is still orderly.
+        Direction biases (navigation-cube convention, top-down XY):
+          Front → minimise Y (cluster toward −Y), secondary X
+          Back  → maximise Y (cluster toward +Y), secondary −X
+          Left  → minimise X (cluster toward −X), secondary Y
+          Right → maximise X (cluster toward +X), secondary −Y
+
+        Center / CustomPoint → minimise distance to gravity target,
+        with Y as a light tie-breaker.
         """
         if self._gravity is not None:
             gx, gy = self._gravity
             dist = math.hypot(px - gx, py - gy)
-            # Distance is the primary driver; Y is a weak tie-breaker.
             return (dist, py, px)
-        # Default BL: minimise Y first, then X.
-        return (py, 0.0, px)
+
+        # Direction biases — primary axis determines packing wall,
+        # secondary axis spreads parts along that wall.
+        if self.bias == PackingBias.Front:
+            return (py, px)         # low Y first, then low X
+        if self.bias == PackingBias.Back:
+            return (-py, -px)       # high Y first, then high X
+        if self.bias == PackingBias.Left:
+            return (px, py)         # low X first, then low Y
+        if self.bias == PackingBias.Right:
+            return (-px, -py)       # high X first, then high Y
+        # Fallback (shouldn't happen).
+        return (py, px)
 
 
 # ---------------------------------------------------------------------------
@@ -916,10 +871,16 @@ def _stockType(stock):
 
 
 def _estimateRequiredStock(outlines, spacing, allow_rotation, rotation_step,
-                           bias=PackingBias.BottomLeft, gravity_point=None):
+                           bias=PackingBias.Front, gravity_point=None,
+                           edge_margin=None):
     """Estimate minimum stock dimensions needed to pack *outlines*."""
     if not outlines:
         return (0, 0)
+
+    if edge_margin is None:
+        edge_margin = spacing / 2.0
+    half_gap = spacing / 2.0
+    edge_inset = max(0.0, edge_margin - half_gap)
 
     total_area = 0
     max_dim = 0
@@ -933,8 +894,14 @@ def _estimateRequiredStock(outlines, spacing, allow_rotation, rotation_step,
     stock_h = side
 
     for _ in range(20):
+        pw = stock_w - 2.0 * edge_inset
+        ph = stock_h - 2.0 * edge_inset
+        if pw < _EPS or ph < _EPS:
+            stock_w *= 1.3
+            stock_h *= 1.3
+            continue
         packer = NFPPacker(
-            stock_w, stock_h,
+            pw, ph,
             spacing=0.0,  # outlines are already offset
             allow_rotation=allow_rotation,
             rotation_step=rotation_step,
@@ -955,7 +922,8 @@ def _estimateRequiredStock(outlines, spacing, allow_rotation, rotation_step,
                 bx0, by0, bx1, by1 = _polygon_bounds(translated)
                 used_w = max(used_w, bx1)
                 used_h = max(used_h, by1)
-            return (used_w + spacing, used_h + spacing)
+            return (used_w + 2.0 * edge_inset + spacing,
+                    used_h + 2.0 * edge_inset + spacing)
         stock_w *= 1.3
         stock_h *= 1.3
 
@@ -964,7 +932,8 @@ def _estimateRequiredStock(outlines, spacing, allow_rotation, rotation_step,
 
 def nestModels(job, spacing=2.0, allow_rotation=True,
                rotation_step=90.0,
-               bias=PackingBias.BottomLeft, gravity_point=None):
+               bias=PackingBias.Front, gravity_point=None,
+               edge_margin=None):
     """Arrange the models of *job* within its stock bounds.
 
     Parameters
@@ -980,6 +949,9 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
         A ``PackingBias`` constant.
     gravity_point : tuple[float, float] | None
         Target ``(x, y)`` for ``PackingBias.CustomPoint``.
+    edge_margin : float | None
+        Minimum gap between parts and the stock boundary in mm.
+        Defaults to ``spacing / 2`` when *None*.
 
     Returns
     -------
@@ -1001,6 +973,11 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
     stype = _stockType(stock)
     gap = float(spacing)
     half_gap = gap / 2.0
+    if edge_margin is None:
+        edge_margin = half_gap
+    else:
+        edge_margin = float(edge_margin)
+    edge_inset = max(0.0, edge_margin - half_gap)
     rot_step = max(float(rotation_step), 1.0)
 
     # ------------------------------------------------------------------
@@ -1015,13 +992,11 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
         outlines.append(_offset_polygon(outline, half_gap))
         local_bbs.append(_localBoundBox(m))
 
-    FreeCAD.Console.PrintMessage(
-        "Nesting: %d model(s), stock type '%s'\n" % (len(models), stype)
-    )
+    Path.Log.debug("Nesting: %d model(s), stock type '%s'" % (len(models), stype))
     for m, poly in zip(models, raw_outlines):
         bb = _polygon_bounds(poly)
-        FreeCAD.Console.PrintMessage(
-            "  '%s'  %.2f x %.2f mm  (%d-gon hull)\n"
+        Path.Log.debug(
+            "  '%s'  %.2f x %.2f mm  (%d-gon hull)"
             % (m.Label, bb[2] - bb[0], bb[3] - bb[1], len(poly))
         )
 
@@ -1032,19 +1007,20 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
         est_w, est_h = _estimateRequiredStock(
             outlines, gap, allow_rotation, rot_step,
             bias=bias, gravity_point=gravity_point,
+            edge_margin=edge_margin,
         )
         stock_w = est_w
         stock_h = est_h
-        FreeCAD.Console.PrintMessage(
-            "Nesting: auto-sizing stock to %.2f x %.2f mm\n"
+        Path.Log.debug(
+            "Nesting: auto-sizing stock to %.2f x %.2f mm"
             % (stock_w, stock_h)
         )
     else:
         sbb = stock.Shape.BoundBox
         stock_w = sbb.XLength
         stock_h = sbb.YLength
-        FreeCAD.Console.PrintMessage(
-            "Nesting: using existing stock %.2f x %.2f mm\n"
+        Path.Log.debug(
+            "Nesting: using existing stock %.2f x %.2f mm"
             % (stock_w, stock_h)
         )
 
@@ -1054,9 +1030,14 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
     # ------------------------------------------------------------------
     # Pack (using NFP)
     # ------------------------------------------------------------------
+    packer_w = stock_w - 2.0 * edge_inset
+    packer_h = stock_h - 2.0 * edge_inset
+    if packer_w < _EPS or packer_h < _EPS:
+        return translate("CAM_Nesting", "Edge margin too large for stock")
+
     packer = NFPPacker(
-        stock_w,
-        stock_h,
+        packer_w,
+        packer_h,
         spacing=0.0,  # spacing already baked into outline offsets
         allow_rotation=bool(allow_rotation),
         rotation_step=rot_step,
@@ -1069,13 +1050,13 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
     # Apply placements
     # ------------------------------------------------------------------
     if stype == "FromBase":
-        stock_x0 = 0.0
-        stock_y0 = 0.0
+        stock_x0 = edge_inset
+        stock_y0 = edge_inset
         stock_z0 = 0.0
     else:
         sbb = stock.Shape.BoundBox
-        stock_x0 = sbb.XMin
-        stock_y0 = sbb.YMin
+        stock_x0 = sbb.XMin + edge_inset
+        stock_y0 = sbb.YMin + edge_inset
         stock_z0 = sbb.ZMin
 
     placed = 0
@@ -1131,8 +1112,8 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
         model.Placement = FreeCAD.Placement(translation, rot)
         placed += 1
 
-        FreeCAD.Console.PrintMessage(
-            "  placed '%s' at (%.2f, %.2f) rot %.1f°\n"
+        Path.Log.debug(
+            "  placed '%s' at (%.2f, %.2f) rot %.1f°"
             % (model.Label, target.x, target.y, angle)
         )
 
@@ -1155,11 +1136,10 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
             FreeCAD.Rotation(),
         )
 
-        margin = gap / 2.0
-        stock.ExtXneg = margin
-        stock.ExtXpos = margin
-        stock.ExtYneg = margin
-        stock.ExtYpos = margin
+        stock.ExtXneg = edge_margin
+        stock.ExtXpos = edge_margin
+        stock.ExtYneg = edge_margin
+        stock.ExtYpos = edge_margin
 
     report = translate("CAM_Nesting", "Placed %d of %d models") % (
         placed, placed + failed,
