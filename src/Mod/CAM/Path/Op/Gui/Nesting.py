@@ -49,16 +49,23 @@ translate = FreeCAD.Qt.translate
 
 
 def _existingBaseObjects(job):
-    """Return a set of the original base object Names in the Job's Model."""
+    """Return a set of Names that are already part of the Job's Model.
+
+    This includes both the model-clone Names themselves *and* the
+    original source-body Names behind each clone.  This prevents
+    ``_classifySelection`` from treating an already-present clone (or
+    its source) as a "new body" to be added again.
+    """
     bases = set()
     if not hasattr(job, "Model") or job.Model is None:
         return bases
     for clone in job.Model.Group:
+        # The clone itself is already in the job.
+        bases.add(clone.Name)
+        # The original body behind the clone.
         if hasattr(clone, "Objects") and clone.Objects:
             for src in clone.Objects:
                 bases.add(src.Name)
-        else:
-            bases.add(clone.Name)
     return bases
 
 
@@ -103,6 +110,8 @@ class NestingTaskPanel:
         self.new_bodies = new_bodies or []
         self._new_clone_map = {}  # original Name -> clone Name
         self._orig_placements = {}  # Name -> FreeCAD.Placement
+        self._orig_map_modes = {}  # Name -> MapMode string
+        self._orig_attach_support = {}  # Name -> AttachmentSupport
         self.form = self._buildUI()
 
     # ----- UI construction -------------------------------------------------
@@ -283,7 +292,7 @@ class NestingTaskPanel:
         self.new_bodies = []
 
     def _savePlacements(self):
-        """Snapshot every model clone's Placement before nesting."""
+        """Snapshot every model clone's Placement and MapMode before nesting."""
         models = (
             list(self.job.Model.Group)
             if hasattr(self.job, "Model") and self.job.Model
@@ -292,12 +301,29 @@ class NestingTaskPanel:
         for m in models:
             if m.Name not in self._orig_placements:
                 self._orig_placements[m.Name] = m.Placement.copy()
+                # Also save MapMode so _restorePlacements can undo any
+                # _detachMapMode call made during nesting.
+                if hasattr(m, "MapMode"):
+                    self._orig_map_modes[m.Name] = m.MapMode
+                    if hasattr(m, "AttachmentSupport"):
+                        self._orig_attach_support[m.Name] = m.AttachmentSupport
 
     def _restorePlacements(self):
-        """Reset every model clone to its pre-nest Placement."""
+        """Reset every model clone to its pre-nest Placement and MapMode."""
         for name, plc in self._orig_placements.items():
             obj = FreeCAD.ActiveDocument.getObject(name)
             if obj is not None:
+                # Restore MapMode first (before Placement) so the
+                # attachment engine can re-activate if needed.
+                if name in self._orig_map_modes and hasattr(obj, "MapMode"):
+                    obj.MapMode = self._orig_map_modes[name]
+                    if (
+                        name in self._orig_attach_support
+                        and hasattr(obj, "AttachmentSupport")
+                    ):
+                        obj.AttachmentSupport = (
+                            self._orig_attach_support[name]
+                        )
                 obj.Placement = plc.copy()
 
     def _runNesting(self):

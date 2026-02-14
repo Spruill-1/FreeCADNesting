@@ -28,6 +28,7 @@ import Path
 import Path.Base.Drillable as Drillable
 import Path.Op.Area as PathAreaOp
 import Path.Op.Base as PathOp
+import Path.Op.TagUtils as TagUtils
 import PathScripts.PathUtils as PathUtils
 import math
 import numpy
@@ -191,6 +192,60 @@ class ObjectProfile(PathAreaOp.ObjectOp):
                     "If doing multiple passes, the extra offset of each additional pass",
                 ),
             ),
+            (
+                "App::PropertyBool",
+                "UseTabs",
+                "Tabs",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Enable holding tabs to keep the part attached to the stock",
+                ),
+            ),
+            (
+                "App::PropertyLength",
+                "TabSpacing",
+                "Tabs",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Approximate distance between holding tabs along each contour",
+                ),
+            ),
+            (
+                "App::PropertyLength",
+                "TabWidth",
+                "Tabs",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Width of each holding tab",
+                ),
+            ),
+            (
+                "App::PropertyLength",
+                "TabHeight",
+                "Tabs",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Height of each holding tab above the final depth",
+                ),
+            ),
+            (
+                "App::PropertyAngle",
+                "TabAngle",
+                "Tabs",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Angle of tab walls (90 = rectangular, 45 = trapezoidal)",
+                ),
+            ),
+            (
+                "App::PropertyBool",
+                "PruneTabs",
+                "Tabs",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Remove tabs that would be destroyed by an adjacent contour's cut",
+                ),
+            ),
         ]
 
     @classmethod
@@ -256,6 +311,12 @@ class ObjectProfile(PathAreaOp.ObjectOp):
             "processPerimeter": True,
             "Stepover": 0,
             "NumPasses": (1, 1, 99999, 1),
+            "UseTabs": False,
+            "TabSpacing": 50.0,
+            "TabWidth": 3.0,
+            "TabHeight": 1.5,
+            "TabAngle": 45.0,
+            "PruneTabs": True,
         }
 
     def areaOpApplyPropertyDefaults(self, obj, job, propList):
@@ -404,6 +465,79 @@ class ObjectProfile(PathAreaOp.ObjectOp):
     def areaOpUseProjection(self, obj):
         """areaOpUseProjection(obj) ... returns True"""
         return True
+
+    def opExecute(self, obj, getsim=False):
+        """opExecute(obj, getsim) ... generate the profile path then apply
+        holding-tab post-processing when UseTabs is enabled."""
+        sims = super().opExecute(obj, getsim)
+
+        if getattr(obj, "UseTabs", False) and obj.TabSpacing.Value > 0:
+            self._applyTabs(obj)
+
+        return sims
+
+    def _applyTabs(self, obj):
+        """_applyTabs(obj) ... post-process self.commandlist to add holding-tab geometry."""
+        path = Path.Path(self.commandlist)
+        if not path.Commands:
+            return
+
+        # Build wire from the path and find the bottom contour(s)
+        wire, rapid, _rapid_indexes = Path.Geom.wireForPath(path)
+        if not wire:
+            Path.Log.warning("Cannot apply tabs: no wire from path")
+            return
+
+        rapidEdges = TagUtils._RapidEdges(rapid)
+        edges = wire.Edges
+        (minZ, maxZ) = TagUtils._findZLimits(edges, rapidEdges)
+        bottomWires = TagUtils._findBottomWires(edges, minZ)
+        if not bottomWires:
+            Path.Log.warning("Cannot apply tabs: no closed bottom wire found")
+            return
+
+        toolRadius = self.radius
+        spacing = obj.TabSpacing.Value
+
+        # Calculate tab count per contour from the requested spacing.
+        tagsByWire = []
+        for bw in bottomWires:
+            n = max(1, round(bw.Length / spacing))
+            wireTags = TagUtils.distributeTags(
+                bw, n,
+                obj.TabWidth.Value,
+                obj.TabHeight.Value,
+                obj.TabAngle,
+                toolRadius,
+            )
+            tagsByWire.append(wireTags)
+
+        # Optionally disable tabs that would be destroyed by an adjacent
+        # contour's cut.
+        if getattr(obj, "PruneTabs", True):
+            tags = TagUtils.pruneConflictingTags(tagsByWire, bottomWires, toolRadius)
+        else:
+            tags = [t for group in tagsByWire for t in group]
+
+        if not tags:
+            Path.Log.warning("Cannot apply tabs: no tags generated")
+            return
+
+        job = PathUtils.findParentJob(obj)
+        tol = job.GeometryTolerance.Value if job else 0.001
+
+        newPath = TagUtils.applyTagsToPath(
+            path, tags, toolRadius,
+            self.horizFeed, self.vertFeed,
+            self.horizRapid, self.vertRapid,
+            tol,
+            _wire=wire, _rapid=rapid,
+        )
+        self.commandlist = newPath.Commands
+        Path.Log.info(
+            "Applied %d holding tab(s) across %d contour(s)"
+            % (len([t for t in tags if t.enabled]), len(bottomWires))
+        )
 
     def opUpdateDepths(self, obj):
         if hasattr(obj, "Base") and obj.Base.__len__() == 0:
@@ -565,11 +699,31 @@ class ObjectProfile(PathAreaOp.ObjectOp):
         #     print(shape)
         return shapes
 
-    # Method to handle each model as a whole, when no faces are selected
     def _processEachModel(self, obj):
+        """_processEachModel(obj) ... handle each model as a whole when no
+        faces are selected.  Models outside the stock XY footprint (e.g.
+        nesting overflow) are skipped."""
         shapeTups = []
+
+        # Skip models that lie entirely outside the stock XY footprint.
+        stockBB = None
+        if self.stock is not None and hasattr(self.stock, "Shape"):
+            stockBB = self.stock.Shape.BoundBox
+
         for base in self.model:
             if hasattr(base, "Shape"):
+                if stockBB is not None:
+                    mbb = base.Shape.BoundBox
+                    # No XY overlap → model is outside the stock.
+                    if (mbb.XMin >= stockBB.XMax
+                            or mbb.XMax <= stockBB.XMin
+                            or mbb.YMin >= stockBB.YMax
+                            or mbb.YMax <= stockBB.YMin):
+                        Path.Log.info(
+                            "Profile: skipping '%s' -- outside stock bounds"
+                            % base.Label
+                        )
+                        continue
                 env = PathUtils.getEnvelope(
                     partshape=base.Shape, subshape=None, depthparams=self.depthparams
                 )

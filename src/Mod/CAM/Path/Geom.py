@@ -595,7 +595,7 @@ def removeDuplicateEdges(wire):
 def flipEdge(edge):
     """flipEdge(edge)
     Flips given edge around so the new Vertexes[0] was the old Vertexes[-1] and vice versa, without changing the shape.
-    Currently only lines, line segments, circles and arcs are supported."""
+    Currently lines, line segments, circles, arcs, B-splines, Bézier curves, offset curves, ellipses, hyperbolas and parabolas are supported."""
 
     if isinstance(edge.Curve, Part.Line) and not edge.Vertexes:
         return Part.Edge(
@@ -644,7 +644,7 @@ def flipEdge(edge):
         flipped.buildFromPolesMultsKnots(poles, mults, knots, perio, degree, weights, ratio)
 
         return Part.Edge(flipped, ma + mi - edge.LastParameter, ma + mi - edge.FirstParameter)
-    elif isinstance(edge.Curve, Part.OffsetCurve):
+    elif isinstance(edge.Curve, (Part.OffsetCurve, Part.Hyperbola, Part.Parabola, Part.Ellipse)):
         return edge.reversed()
 
     Path.Log.warning(translate("PathGeom", "%s not supported for flipping") % type(edge.Curve))

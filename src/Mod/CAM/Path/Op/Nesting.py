@@ -845,6 +845,22 @@ def _isStockModel(model, stock):
     return False
 
 
+def _detachMapMode(model):
+    """Detach *model* from any attachment so its Placement is free-standing.
+
+    Some objects (e.g. Part features created on a reference plane) have a
+    ``MapMode`` property that causes the Attachment engine to recalculate
+    the Placement on every recompute, overriding any value we set.
+    Setting MapMode to ``"Deactivated"`` makes the Placement a plain,
+    persistent property that survives ``FreeCAD.ActiveDocument.recompute()``.
+    """
+    if hasattr(model, "MapMode") and model.MapMode != "Deactivated":
+        Path.Log.debug(
+            "Nesting: detaching '%s' from MapMode '%s'" % (model.Label, model.MapMode)
+        )
+        model.MapMode = "Deactivated"
+
+
 def _stockType(stock):
     """Return a string describing the stock type."""
     stype = PathStock.StockType.FromStock(stock)
@@ -979,6 +995,16 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
         edge_margin = float(edge_margin)
     edge_inset = max(0.0, edge_margin - half_gap)
     rot_step = max(float(rotation_step), 1.0)
+
+    # ------------------------------------------------------------------
+    # Detach attachment modes first, so subsequent geometry queries see
+    # the post-detach Shape.  If we deferred this to the placement loop
+    # the outline / bounding-box data would be computed from the pre-
+    # detach Shape and could become stale if deactivating MapMode
+    # triggers a shape recalculation.
+    # ------------------------------------------------------------------
+    for m in models:
+        _detachMapMode(m)
 
     # ------------------------------------------------------------------
     # Extract 2-D outlines and apply spacing offset

@@ -219,6 +219,121 @@
     </widget>
    </item>
    <item row="3" column="0">
+    <widget class="QGroupBox" name="tabGroup">
+     <property name="title">
+      <string>Holding Tabs</string>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_tabs">
+      <item row="0" column="0" colspan="2">
+       <widget class="QCheckBox" name="useTabs">
+        <property name="toolTip">
+         <string>Enable holding tabs to keep the part attached to the stock during profiling</string>
+        </property>
+        <property name="text">
+         <string>Use Tabs</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="tabSpacingLabel">
+        <property name="text">
+         <string>Tab spacing</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="Gui::InputField" name="tabSpacing">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="toolTip">
+         <string>Approximate distance between tabs along each contour</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="tabWidthLabel">
+        <property name="text">
+         <string>Tab width</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="Gui::InputField" name="tabWidth">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="toolTip">
+         <string>Width of each holding tab</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="tabHeightLabel">
+        <property name="text">
+         <string>Tab height</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="Gui::InputField" name="tabHeight">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="toolTip">
+         <string>Height of each holding tab above the final depth</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="tabAngleLabel">
+        <property name="text">
+         <string>Tab angle</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QDoubleSpinBox" name="tabAngle">
+        <property name="minimum">
+         <double>10.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>90.000000000000000</double>
+        </property>
+        <property name="value">
+         <double>45.000000000000000</double>
+        </property>
+        <property name="suffix">
+         <string>°</string>
+        </property>
+        <property name="toolTip">
+         <string>Angle of tab walls (90 = rectangular, 45 = trapezoidal)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0" colspan="2">
+       <widget class="QCheckBox" name="pruneTabs">
+        <property name="toolTip">
+         <string>Remove tabs that would be destroyed by an adjacent contour's cut</string>
+        </property>
+        <property name="text">
+         <string>Prune overlapping tabs</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item row="4" column="0">
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
@@ -250,6 +365,12 @@
   <tabstop>processHoles</tabstop>
   <tabstop>processCircles</tabstop>
   <tabstop>processPerimeter</tabstop>
+  <tabstop>useTabs</tabstop>
+  <tabstop>tabSpacing</tabstop>
+  <tabstop>tabWidth</tabstop>
+  <tabstop>tabHeight</tabstop>
+  <tabstop>tabAngle</tabstop>
+  <tabstop>pruneTabs</tabstop>
  </tabstops>
  <resources/>
  <connections/>

@@ -67,6 +67,14 @@ from CAMTests.TestPathPost import TestFileNameGenerator
 
 from CAMTests.TestPathPreferences import TestPathPreferences
 from CAMTests.TestPathProfile import TestPathProfile
+from CAMTests.TestPathProfileTabs import TestTagGeometry
+from CAMTests.TestPathProfileTabs import TestTagDistribution
+from CAMTests.TestPathProfileTabs import TestRapidEdges
+from CAMTests.TestPathProfileTabs import TestPathModification
+from CAMTests.TestPathProfileTabs import TestPassSegmentation
+from CAMTests.TestPathProfileTabs import TestBottomWire
+from CAMTests.TestPathProfileTabs import TestMultiContourTabs
+from CAMTests.TestPathProfileTabs import TestTabPruning
 from CAMTests.TestPathPropertyBag import TestPathPropertyBag
 from CAMTests.TestPathRotationGenerator import TestPathRotationGenerator
 from CAMTests.TestPathSetupSheet import TestPathSetupSheet

@@ -373,6 +373,7 @@ SET(PathPythonOp_SRCS
     Path/Op/Slot.py
     Path/Op/Surface.py
     Path/Op/SurfaceSupport.py
+    Path/Op/TagUtils.py
     Path/Op/Tapping.py
     Path/Op/ThreadMilling.py
     Path/Op/Util.py
@@ -548,6 +549,7 @@ SET(Tests_SRCS
     CAMTests/TestPathPost.py
     CAMTests/TestPathPreferences.py
     CAMTests/TestPathProfile.py
+    CAMTests/TestPathProfileTabs.py
     CAMTests/TestPathPropertyBag.py
     CAMTests/TestPathRotationGenerator.py
     CAMTests/TestPathSetupSheet.py

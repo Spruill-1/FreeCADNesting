@@ -23,11 +23,18 @@
 
 import FreeCAD
 import FreeCADGui
+import Path
 import Path.Base.Gui.Util as PathGuiUtil
 import Path.Op.Gui.Base as PathOpGui
 import Path.Op.Profile as PathProfile
+import Path.Op.TagUtils as TagUtils
 import PathGui
 from PySide.QtCore import QT_TRANSLATE_NOOP
+
+try:
+    from pivy import coin
+except ImportError:
+    coin = None
 
 
 __title__ = "CAM Profile Operation UI"
@@ -49,6 +56,26 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
     # def initPage(self, obj):
     #     self.setTitle("Profile - " + obj.Label)
     #     self.updateVisibility()
+
+    def initPage(self, obj):
+        """initPage(obj) ... set up coin3d nodes for tab preview markers."""
+        self._tabSwitch = None
+        if coin is not None:
+            self._tabSwitch = coin.SoSwitch()
+            self._tabSwitch.whichChild = coin.SO_SWITCH_NONE
+            try:
+                obj.ViewObject.RootNode.addChild(self._tabSwitch)
+            except Exception:
+                self._tabSwitch = None
+
+    def cleanupPage(self, obj):
+        """cleanupPage(obj) ... remove coin3d tab preview nodes."""
+        if self._tabSwitch is not None:
+            try:
+                obj.ViewObject.RootNode.removeChild(self._tabSwitch)
+            except (ReferenceError, RuntimeError):
+                pass
+            self._tabSwitch = None
 
     def profileFeatures(self):
         """profileFeatures() ... return which of the optional profile features are supported.
@@ -93,6 +120,17 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
         if obj.processCircles != self.form.processCircles.isChecked():
             obj.processCircles = self.form.processCircles.isChecked()
 
+        # Tabs
+        if obj.UseTabs != self.form.useTabs.isChecked():
+            obj.UseTabs = self.form.useTabs.isChecked()
+        PathGuiUtil.updateInputField(obj, "TabSpacing", self.form.tabSpacing)
+        PathGuiUtil.updateInputField(obj, "TabWidth", self.form.tabWidth)
+        PathGuiUtil.updateInputField(obj, "TabHeight", self.form.tabHeight)
+        if obj.TabAngle != self.form.tabAngle.value():
+            obj.TabAngle = self.form.tabAngle.value()
+        if obj.PruneTabs != self.form.pruneTabs.isChecked():
+            obj.PruneTabs = self.form.pruneTabs.isChecked()
+
     def setFields(self, obj):
         """setFields(obj) ... transfers obj's property values to UI"""
         self.setupToolController(obj, self.form.toolController)
@@ -114,6 +152,20 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
         self.form.processPerimeter.setChecked(obj.processPerimeter)
         self.form.processCircles.setChecked(obj.processCircles)
 
+        # Tabs
+        self.form.useTabs.setChecked(obj.UseTabs)
+        self.form.tabSpacing.setText(
+            FreeCAD.Units.Quantity(obj.TabSpacing.Value, FreeCAD.Units.Length).UserString
+        )
+        self.form.tabWidth.setText(
+            FreeCAD.Units.Quantity(obj.TabWidth.Value, FreeCAD.Units.Length).UserString
+        )
+        self.form.tabHeight.setText(
+            FreeCAD.Units.Quantity(obj.TabHeight.Value, FreeCAD.Units.Length).UserString
+        )
+        self.form.tabAngle.setValue(obj.TabAngle)
+        self.form.pruneTabs.setChecked(obj.PruneTabs)
+
         self.updateVisibility()
 
     def getSignalsForUpdate(self, obj):
@@ -132,12 +184,24 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
             signals.append(self.form.processHoles.checkStateChanged)
             signals.append(self.form.processPerimeter.checkStateChanged)
             signals.append(self.form.processCircles.checkStateChanged)
+            signals.append(self.form.useTabs.checkStateChanged)
         else:  # Qt version < 6.7.0
             signals.append(self.form.useCompensation.stateChanged)
             signals.append(self.form.useStartPoint.stateChanged)
             signals.append(self.form.processHoles.stateChanged)
             signals.append(self.form.processPerimeter.stateChanged)
             signals.append(self.form.processCircles.stateChanged)
+            signals.append(self.form.useTabs.stateChanged)
+
+        # Tab property signals
+        signals.append(self.form.tabSpacing.editingFinished)
+        signals.append(self.form.tabWidth.editingFinished)
+        signals.append(self.form.tabHeight.editingFinished)
+        signals.append(self.form.tabAngle.editingFinished)
+        if hasattr(self.form.pruneTabs, "checkStateChanged"):  # Qt version >= 6.7.0
+            signals.append(self.form.pruneTabs.checkStateChanged)
+        else:
+            signals.append(self.form.pruneTabs.stateChanged)
 
         return signals
 
@@ -166,11 +230,109 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
 
         self.form.stepover.setEnabled(self.obj.NumPasses > 1)
 
+        # Tab controls enabled/disabled based on UseTabs checkbox
+        tabsEnabled = self.form.useTabs.isChecked()
+        self.form.tabSpacing.setEnabled(tabsEnabled)
+        self.form.tabWidth.setEnabled(tabsEnabled)
+        self.form.tabHeight.setEnabled(tabsEnabled)
+        self.form.tabAngle.setEnabled(tabsEnabled)
+        self.form.pruneTabs.setEnabled(tabsEnabled)
+
+        self._updateTabPreview()
+
+    def _updateTabPreview(self):
+        """_updateTabPreview() ... rebuild coin3d sphere markers at computed tab positions."""
+        if self._tabSwitch is None:
+            return
+
+        # Clear previous markers
+        self._tabSwitch.removeAllChildren()
+        self._tabSwitch.whichChild = coin.SO_SWITCH_NONE
+
+        if not self.form.useTabs.isChecked():
+            return
+
+        obj = self.obj
+        try:
+            path = obj.Path
+        except Exception:
+            return
+        if not path or not path.Commands:
+            return
+
+        wire, rapid, _ = Path.Geom.wireForPath(path)
+        if not wire:
+            return
+
+        rapidEdges = TagUtils._RapidEdges(rapid)
+        edges = wire.Edges
+        (minZ, maxZ) = TagUtils._findZLimits(edges, rapidEdges)
+        bottomWires = TagUtils._findBottomWires(edges, minZ)
+        if not bottomWires:
+            return
+
+        spacing = obj.TabSpacing.Value
+        if spacing <= 0:
+            return
+
+        # Compute tag positions on each contour, optionally prune conflicting ones.
+        tagsByWire = []
+        for bw in bottomWires:
+            n = max(1, round(bw.Length / spacing))
+            wireTags = TagUtils.distributeTags(
+                bw, n,
+                obj.TabWidth.Value,
+                obj.TabHeight.Value,
+                obj.TabAngle,
+                0,  # no tool radius padding for preview position
+            )
+            tagsByWire.append(wireTags)
+
+        if getattr(obj, "PruneTabs", True) and self.form.pruneTabs.isChecked():
+            allTags = TagUtils.pruneConflictingTags(tagsByWire, bottomWires, 0)
+        else:
+            allTags = [t for group in tagsByWire for t in group]
+
+        if not allTags:
+            return
+
+        # Build a coin3d separator for each marker.
+        # Enabled tabs are green; pruned (disabled) tabs are red/transparent.
+        for tag in allTags:
+            sep = coin.SoSeparator()
+
+            pos = coin.SoTranslation()
+            pos.translation = (tag.x, tag.y, minZ)
+
+            mat = coin.SoMaterial()
+            if tag.enabled:
+                mat.diffuseColor = (0.0, 0.8, 0.0)  # green
+                mat.transparency = 0.3
+            else:
+                mat.diffuseColor = (0.8, 0.0, 0.0)  # red
+                mat.transparency = 0.6
+
+            sphere = coin.SoSphere()
+            scale = coin.SoType.fromName("SoShapeScale").createInstance()
+            scale.setPart("shape", sphere)
+            scale.scaleFactor.setValue(14)
+
+            sep.addChild(pos)
+            sep.addChild(mat)
+            sep.addChild(scale)
+            self._tabSwitch.addChild(sep)
+
+        self._tabSwitch.whichChild = coin.SO_SWITCH_ALL
+
     def registerSignalHandlers(self, obj):
         if hasattr(self.form.useCompensation, "checkStateChanged"):  # Qt version >= 6.7.0
             self.form.useCompensation.checkStateChanged.connect(self.updateVisibility)
+            self.form.useTabs.checkStateChanged.connect(self.updateVisibility)
+            self.form.pruneTabs.checkStateChanged.connect(self.updateVisibility)
         else:  # Qt version < 6.7.0
             self.form.useCompensation.stateChanged.connect(self.updateVisibility)
+            self.form.useTabs.stateChanged.connect(self.updateVisibility)
+            self.form.pruneTabs.stateChanged.connect(self.updateVisibility)
         self.form.numPasses.editingFinished.connect(self.updateVisibility)
 
 
