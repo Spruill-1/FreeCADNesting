@@ -438,12 +438,57 @@ def _strictly_inside_convex(px, py, poly):
     return True
 
 
+def _strict_convex_overlap(poly_a, poly_b):
+    """Return True when convex polygons have a strict interior overlap.
+
+    Touching on an edge or vertex is treated as non-overlapping.
+    """
+    if len(poly_a) < 3 or len(poly_b) < 3:
+        return False
+
+    def _axes(poly):
+        axes = []
+        n = len(poly)
+        for i in range(n):
+            x0, y0 = poly[i]
+            x1, y1 = poly[(i + 1) % n]
+            ex = x1 - x0
+            ey = y1 - y0
+            length = math.hypot(ex, ey)
+            if length < _EPS:
+                continue
+            # Unit normal axis.
+            axes.append((-ey / length, ex / length))
+        return axes
+
+    def _project(poly, axis):
+        ax, ay = axis
+        p0 = poly[0][0] * ax + poly[0][1] * ay
+        pmin = pmax = p0
+        for x, y in poly[1:]:
+            v = x * ax + y * ay
+            if v < pmin:
+                pmin = v
+            if v > pmax:
+                pmax = v
+        return pmin, pmax
+
+    for axis in _axes(poly_a) + _axes(poly_b):
+        a_min, a_max = _project(poly_a, axis)
+        b_min, b_max = _project(poly_b, axis)
+        # Separated OR merely touching on this axis => no strict overlap.
+        if a_max <= b_min + _EPS or b_max <= a_min + _EPS:
+            return False
+
+    return True
+
+
 # ---------------------------------------------------------------------------
 #   2-D outline extraction from FreeCAD shapes
 # ---------------------------------------------------------------------------
 
 
-def _extract_outline_2d(model):
+def _extract_outline_2d(model, pre_rotation=None):
     """Return a convex-hull polygon [(x,y), ...] of *model*'s XY projection.
 
     The shape is reset to identity placement so the outline is in the
@@ -451,7 +496,9 @@ def _extract_outline_2d(model):
     tight convex boundary of the part when viewed from above.
     """
     shape = model.Shape.copy()
-    shape.Placement = FreeCAD.Placement()
+    shape.Placement = FreeCAD.Placement(
+        FreeCAD.Vector(), pre_rotation or FreeCAD.Rotation()
+    )
 
     points_2d = []
 
@@ -473,13 +520,13 @@ def _extract_outline_2d(model):
             pass
 
     if len(points_2d) < 3:
-        # Fallback to bounding box (normalised to origin).
+        # Fallback to bounding box in the model's local frame.
         bb = shape.BoundBox
         return [
-            (0.0, 0.0),
-            (bb.XLength, 0.0),
-            (bb.XLength, bb.YLength),
-            (0.0, bb.YLength),
+            (bb.XMin, bb.YMin),
+            (bb.XMax, bb.YMin),
+            (bb.XMax, bb.YMax),
+            (bb.XMin, bb.YMax),
         ]
 
     hull = _convex_hull(points_2d)
@@ -492,14 +539,29 @@ def _extract_outline_2d(model):
             (bb.XMin, bb.YMax),
         ]
     hull = _ensure_ccw(hull)
-
-    # Normalise so the bounding-box minimum sits at (0, 0).
-    # This makes the packer's reference point == the outline's lower-left
-    # corner, which maps directly to (lbb.XMin, lbb.YMin) in local space.
-    xmin, ymin, _xmax, _ymax = _polygon_bounds(hull)
-    if abs(xmin) > _EPS or abs(ymin) > _EPS:
-        hull = [(x - xmin, y - ymin) for x, y in hull]
     return hull
+
+
+def _rotationToPositiveZ(vector):
+    """Return a rotation that aligns *vector* to +Z."""
+    if vector is None or vector.Length < _EPS:
+        return FreeCAD.Rotation()
+
+    source = FreeCAD.Vector(vector)
+    source.normalize()
+    target = FreeCAD.Vector(0, 0, 1)
+    dot = max(-1.0, min(1.0, source.dot(target)))
+
+    if abs(dot - 1.0) < 1e-8:
+        return FreeCAD.Rotation()
+    if abs(dot + 1.0) < 1e-8:
+        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180.0)
+
+    axis = source.cross(target)
+    if axis.Length < _EPS:
+        return FreeCAD.Rotation()
+    angle = math.degrees(math.acos(dot))
+    return FreeCAD.Rotation(axis, angle)
 
 
 def _offset_polygon(poly, distance):
@@ -606,6 +668,7 @@ class NFPPacker:
         self.rotation_step = max(rotation_step, 1.0)
         self.bias = bias
         self._placed_polys = []  # list of translated+rotated offset polys
+        self._cluster_bounds = None  # (xmin, ymin, xmax, ymax)
 
         # Pre-compute gravity target.
         if bias == PackingBias.Center:
@@ -653,6 +716,7 @@ class NFPPacker:
             px, py, angle, placed_poly = best
 
             self._placed_polys.append(placed_poly)
+            self._update_cluster_bounds(placed_poly)
             results[orig_idx] = (px, py, angle)
 
         # --- Center / CustomPoint: shift entire cluster -------------------
@@ -711,16 +775,105 @@ class NFPPacker:
                        _position_valid(pt[0], pt[1], nfps):
                         candidates.append(pt)
 
+            # Always augment with interior sampling so we can exploit
+            # free pockets that boundary-only candidates may miss.
+            # Keep this bounded to avoid runtime blowups.
+            interior_samples = self._sample_ifp_interior(
+                ifp,
+                nfps,
+                density=(7 if candidates else 11),
+            )
+            candidates.extend(interior_samples)
+
+            # Deduplicate candidate points with geometric tolerance.
+            deduped = []
+            for pt in candidates:
+                if all(
+                    abs(pt[0] - q[0]) > _EPS or abs(pt[1] - q[1]) > _EPS
+                    for q in deduped
+                ):
+                    deduped.append(pt)
+            candidates = deduped
+
             for cx, cy in candidates:
-                score = self._placement_score(cx, cy, rotated)
+                placed = _translate_polygon(rotated, cx, cy)
+                if not self._is_collision_free(placed):
+                    continue
+                score = self._placement_score(cx, cy, placed)
                 if best is None or score < best[0]:
-                    placed = _translate_polygon(rotated, cx, cy)
                     best = (score, cx, cy, angle, placed)
 
         if best is None:
             return None
         _score, px, py, angle, placed_poly = best
         return (px, py, angle, placed_poly)
+
+    def _is_collision_free(self, candidate_poly):
+        """Return True if *candidate_poly* does not strictly overlap placed polys."""
+        for placed in self._placed_polys:
+            if _strict_convex_overlap(candidate_poly, placed):
+                return False
+        return True
+
+    def _sample_ifp_interior(self, ifp, nfps, density=11):
+        """Return additional feasible candidate points sampled inside IFP."""
+        if len(ifp) < 3:
+            return []
+
+        xmin, ymin, xmax, ymax = _polygon_bounds(ifp)
+        w = xmax - xmin
+        h = ymax - ymin
+        if w < _EPS or h < _EPS:
+            return []
+
+        points = []
+        # Deterministic lattice sampling; bounded by density parameter.
+        n = max(5, int(density))
+        stepx = w / n
+        stepy = h / n
+        for iy in range(n + 1):
+            py = ymin + iy * stepy
+            for ix in range(n + 1):
+                px = xmin + ix * stepx
+                if not _point_in_convex_polygon(px, py, ifp):
+                    continue
+                if not _position_valid(px, py, nfps):
+                    continue
+                points.append((px, py))
+
+        # Also sample box center and corners (if feasible).
+        extras = [
+            ((xmin + xmax) / 2.0, (ymin + ymax) / 2.0),
+            (xmin, ymin),
+            (xmin, ymax),
+            (xmax, ymin),
+            (xmax, ymax),
+        ]
+        for px, py in extras:
+            if _point_in_convex_polygon(px, py, ifp) and _position_valid(px, py, nfps):
+                points.append((px, py))
+
+        # Deduplicate with geometric tolerance.
+        unique = []
+        for pt in points:
+            if all(abs(pt[0] - q[0]) > _EPS or abs(pt[1] - q[1]) > _EPS for q in unique):
+                unique.append(pt)
+        return unique
+
+    def _update_cluster_bounds(self, poly):
+        """Expand cached cluster bounds with *poly*."""
+        bx0, by0, bx1, by1 = _polygon_bounds(poly)
+        if self._cluster_bounds is None:
+            self._cluster_bounds = (bx0, by0, bx1, by1)
+            return
+
+        cx0, cy0, cx1, cy1 = self._cluster_bounds
+        self._cluster_bounds = (
+            min(cx0, bx0),
+            min(cy0, by0),
+            max(cx1, bx1),
+            max(cy1, by1),
+        )
 
     def _shift_to_gravity(self, results, outlines):
         """Translate all placed parts so the cluster centre aligns with
@@ -780,7 +933,7 @@ class NFPPacker:
                 yield a
                 a += self.rotation_step
 
-    def _placement_score(self, px, py, rotated_poly):
+    def _placement_score(self, px, py, candidate_poly):
         """Score a candidate position — lower is better.
 
         Direction biases (navigation-cube convention, top-down XY):
@@ -792,23 +945,34 @@ class NFPPacker:
         Center / CustomPoint → minimise distance to gravity target,
         with Y as a light tie-breaker.
         """
+        bx0, by0, bx1, by1 = _polygon_bounds(candidate_poly)
+        if self._cluster_bounds is None:
+            env_area = (bx1 - bx0) * (by1 - by0)
+        else:
+            cx0, cy0, cx1, cy1 = self._cluster_bounds
+            ux0 = min(cx0, bx0)
+            uy0 = min(cy0, by0)
+            ux1 = max(cx1, bx1)
+            uy1 = max(cy1, by1)
+            env_area = (ux1 - ux0) * (uy1 - uy0)
+
         if self._gravity is not None:
             gx, gy = self._gravity
             dist = math.hypot(px - gx, py - gy)
-            return (dist, py, px)
+            return (dist, env_area, py, px)
 
         # Direction biases — primary axis determines packing wall,
         # secondary axis spreads parts along that wall.
         if self.bias == PackingBias.Front:
-            return (py, px)         # low Y first, then low X
+            return (py, env_area, px)         # low Y first, then compactness
         if self.bias == PackingBias.Back:
-            return (-py, -px)       # high Y first, then high X
+            return (-py, env_area, -px)       # high Y first, then compactness
         if self.bias == PackingBias.Left:
-            return (px, py)         # low X first, then low Y
+            return (px, env_area, py)         # low X first, then compactness
         if self.bias == PackingBias.Right:
-            return (-px, -py)       # high X first, then high Y
+            return (-px, env_area, -py)       # high X first, then compactness
         # Fallback (shouldn't happen).
-        return (py, px)
+        return (py, env_area, px)
 
 
 # ---------------------------------------------------------------------------
@@ -816,11 +980,13 @@ class NFPPacker:
 # ---------------------------------------------------------------------------
 
 
-def _localBoundBox(model):
+def _localBoundBox(model, pre_rotation=None):
     """Return the bounding box of *model*'s shape in its local (identity-
     placement) coordinate frame."""
     shape = model.Shape.copy()
-    shape.Placement = FreeCAD.Placement()
+    shape.Placement = FreeCAD.Placement(
+        FreeCAD.Vector(), pre_rotation or FreeCAD.Rotation()
+    )
     return shape.BoundBox
 
 
@@ -859,6 +1025,37 @@ def _detachMapMode(model):
             "Nesting: detaching '%s' from MapMode '%s'" % (model.Label, model.MapMode)
         )
         model.MapMode = "Deactivated"
+
+
+def _shapes_overlap_xy(a_shape, b_shape):
+    """Return True if two placed shapes overlap in a meaningful way.
+
+    Uses XY bound-box overlap as a fast reject, then exact shape-common
+    geometry to avoid false positives from bounding boxes alone.
+    """
+    abb = a_shape.BoundBox
+    bbb = b_shape.BoundBox
+
+    ox = min(abb.XMax, bbb.XMax) - max(abb.XMin, bbb.XMin)
+    oy = min(abb.YMax, bbb.YMax) - max(abb.YMin, bbb.YMin)
+    if ox <= _EPS or oy <= _EPS:
+        return False
+
+    try:
+        common = a_shape.common(b_shape)
+        if common is None or common.isNull():
+            return False
+        # Solids: positive volume means true overlap.
+        if hasattr(common, "Volume") and common.Volume > _EPS:
+            return True
+        # Thin/open geometry fallback: positive common area indicates overlap.
+        if hasattr(common, "Area") and common.Area > _EPS:
+            return True
+    except Exception:
+        # Conservative fallback when exact boolean fails.
+        return True
+
+    return False
 
 
 def _stockType(stock):
@@ -949,7 +1146,9 @@ def _estimateRequiredStock(outlines, spacing, allow_rotation, rotation_step,
 def nestModels(job, spacing=2.0, allow_rotation=True,
                rotation_step=90.0,
                bias=PackingBias.Front, gravity_point=None,
-               edge_margin=None):
+               edge_margin=None,
+               global_up_vector=None,
+               global_origin_mode="stock_min"):
     """Arrange the models of *job* within its stock bounds.
 
     Parameters
@@ -968,6 +1167,12 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
     edge_margin : float | None
         Minimum gap between parts and the stock boundary in mm.
         Defaults to ``spacing / 2`` when *None*.
+    global_up_vector : FreeCAD.Vector | None
+        Optional global up direction for the full nested set. When provided,
+        all models are rotated using the same alignment-to-+Z transform.
+    global_origin_mode : str
+        Origin handling for the full nested set. Supported values:
+        ``"stock_min"`` (default) and ``"stock_center"``.
 
     Returns
     -------
@@ -996,6 +1201,13 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
     edge_inset = max(0.0, edge_margin - half_gap)
     rot_step = max(float(rotation_step), 1.0)
 
+    up_rotations = []
+    if global_up_vector is not None:
+        global_rot = _rotationToPositiveZ(global_up_vector)
+        up_rotations = [global_rot] * len(models)
+    else:
+        up_rotations = [FreeCAD.Rotation()] * len(models)
+
     # ------------------------------------------------------------------
     # Detach attachment modes first, so subsequent geometry queries see
     # the post-detach Shape.  If we deferred this to the placement loop
@@ -1012,11 +1224,11 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
     raw_outlines = []
     outlines = []      # offset by half_gap
     local_bbs = []
-    for m in models:
-        outline = _extract_outline_2d(m)
+    for m, up_rotation in zip(models, up_rotations):
+        outline = _extract_outline_2d(m, pre_rotation=up_rotation)
         raw_outlines.append(outline)
         outlines.append(_offset_polygon(outline, half_gap))
-        local_bbs.append(_localBoundBox(m))
+        local_bbs.append(_localBoundBox(m, pre_rotation=up_rotation))
 
     Path.Log.debug("Nesting: %d model(s), stock type '%s'" % (len(models), stype))
     for m, poly in zip(models, raw_outlines):
@@ -1087,10 +1299,15 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
 
     placed = 0
     failed = 0
+    accepted_shapes = []
     overflow_x = stock_x0 + stock_w + 10.0
     overflow_y = stock_y0
+    stock_x1 = stock_x0 + packer_w
+    stock_y1 = stock_y0 + packer_h
 
-    for idx, (model, lbb) in enumerate(zip(models, local_bbs)):
+    for idx, (model, lbb, up_rotation) in enumerate(
+        zip(models, local_bbs, up_rotations)
+    ):
         if results[idx] is None:
             bb = _polygon_bounds(raw_outlines[idx])
             FreeCAD.Console.PrintWarning(
@@ -1110,42 +1327,100 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
             continue
 
         nest_x, nest_y, angle = results[idx]
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle)
+        rot_z = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle)
+        rot = rot_z.multiply(up_rotation)
 
-        # The packer placed the *normalised* outline at (nest_x, nest_y).
-        # The normalised outline's (0,0) corresponds to
-        # (lbb.XMin, lbb.YMin, lbb.ZMin) in the model's local frame.
-        #
-        # When FreeCAD applies Placement = (translation, rotation), it
-        # first rotates the shape (in local coords) about the origin,
-        # then translates.  So the local point (lbb.XMin, lbb.YMin,
-        # lbb.ZMin) ends up at:
-        #     rot * (XMin, YMin, ZMin) + translation
-        #
-        # We want that to equal (stock_x0 + nest_x, stock_y0 + nest_y,
-        # stock_z0).  Therefore:
-        #     translation = target - rot * local_min
-        local_min = FreeCAD.Vector(lbb.XMin, lbb.YMin, lbb.ZMin)
-        rotated_min = rot.multVec(local_min)
+        # Place using the same reference point as the packer (model local
+        # origin in XY), then set Z so the part sits on stock base.
+        rotated_shape = model.Shape.copy()
+        rotated_shape.Placement = FreeCAD.Placement(FreeCAD.Vector(), rot)
+        rotated_bb = rotated_shape.BoundBox
 
-        target = FreeCAD.Vector(
+        translation = FreeCAD.Vector(
             stock_x0 + nest_x,
             stock_y0 + nest_y,
-            stock_z0,
+            stock_z0 - rotated_bb.ZMin,
         )
-        translation = target - rotated_min
 
         model.Placement = FreeCAD.Placement(translation, rot)
+
+        placed_bb = model.Shape.BoundBox
+        if (
+            placed_bb.XMin < stock_x0 - _EPS
+            or placed_bb.YMin < stock_y0 - _EPS
+            or placed_bb.XMax > stock_x1 + _EPS
+            or placed_bb.YMax > stock_y1 + _EPS
+        ):
+            FreeCAD.Console.PrintWarning(
+                "Nesting: '%s' exceeded stock bounds after up-axis rotation; "
+                "moving to overflow\n" % model.Label
+            )
+            overflow_translation = FreeCAD.Vector(
+                overflow_x - lbb.XMin,
+                overflow_y - lbb.YMin,
+                stock_z0 - lbb.ZMin,
+            )
+            model.Placement = FreeCAD.Placement(
+                overflow_translation, FreeCAD.Rotation()
+            )
+            overflow_y += lbb.YLength + 5.0
+            results[idx] = None
+            failed += 1
+            continue
+
+        has_collision = False
+        for other_shape in accepted_shapes:
+            if _shapes_overlap_xy(model.Shape, other_shape):
+                has_collision = True
+                break
+
+        if has_collision:
+            FreeCAD.Console.PrintWarning(
+                "Nesting: '%s' overlapped an already placed part; moving to "
+                "overflow\n" % model.Label
+            )
+            overflow_translation = FreeCAD.Vector(
+                overflow_x - lbb.XMin,
+                overflow_y - lbb.YMin,
+                stock_z0 - lbb.ZMin,
+            )
+            model.Placement = FreeCAD.Placement(
+                overflow_translation, FreeCAD.Rotation()
+            )
+            overflow_y += lbb.YLength + 5.0
+            results[idx] = None
+            failed += 1
+            continue
+
+        accepted_shapes.append(model.Shape.copy())
+
         placed += 1
 
         Path.Log.debug(
             "  placed '%s' at (%.2f, %.2f) rot %.1f°"
-            % (model.Label, target.x, target.y, angle)
+            % (model.Label, placed_bb.XMin, placed_bb.YMin, angle)
         )
 
     # ------------------------------------------------------------------
     # FromBase stock: update placement and extensions
     # ------------------------------------------------------------------
+    if placed > 0 and global_origin_mode == "stock_center":
+        placed_models = [m for idx, m in enumerate(models) if results[idx] is not None]
+        models_bb = FreeCAD.BoundBox()
+        for model in placed_models:
+            models_bb.add(model.Shape.BoundBox)
+
+        stock_center_x = (stock_x0 + stock_x1) / 2.0
+        stock_center_y = (stock_y0 + stock_y1) / 2.0
+        dx = stock_center_x - (models_bb.XMin + models_bb.XMax) / 2.0
+        dy = stock_center_y - (models_bb.YMin + models_bb.YMax) / 2.0
+        shift = FreeCAD.Vector(dx, dy, 0.0)
+        for model in placed_models:
+            model.Placement = FreeCAD.Placement(
+                model.Placement.Base + shift,
+                model.Placement.Rotation,
+            )
+
     if stype == "FromBase" and placed > 0:
         # Compute the global bounding box of the newly-placed models so
         # the stock wraps tightly around them.

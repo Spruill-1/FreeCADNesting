@@ -53,6 +53,7 @@ _compute_ifp = Nesting._compute_ifp
 _point_in_convex_polygon = Nesting._point_in_convex_polygon
 _position_valid = Nesting._position_valid
 _strictly_inside_convex = Nesting._strictly_inside_convex
+_strict_convex_overlap = Nesting._strict_convex_overlap
 _offset_polygon = Nesting._offset_polygon
 _clip_ifp_edges_against_nfps = Nesting._clip_ifp_edges_against_nfps
 
@@ -276,6 +277,26 @@ class TestNestingGeometry(PathTestBase):
         """Edge point is NOT strictly inside."""
         self.assertFalse(_strictly_inside_convex(0.5, 0, UNIT_SQUARE))
 
+    # -- strict convex overlap ---------------------------------------------
+
+    def test_strict_overlap_true_for_interior_intersection(self):
+        """Interior-intersecting convex polygons are reported overlapping."""
+        a = [(0, 0), (4, 0), (4, 4), (0, 4)]
+        b = [(2, 2), (6, 2), (6, 6), (2, 6)]
+        self.assertTrue(_strict_convex_overlap(a, b))
+
+    def test_strict_overlap_false_for_edge_touch(self):
+        """Edge-touching polygons are allowed (not strict overlap)."""
+        a = [(0, 0), (4, 0), (4, 4), (0, 4)]
+        b = [(4, 0), (8, 0), (8, 4), (4, 4)]
+        self.assertFalse(_strict_convex_overlap(a, b))
+
+    def test_strict_overlap_false_for_separated(self):
+        """Separated polygons are not overlapping."""
+        a = [(0, 0), (4, 0), (4, 4), (0, 4)]
+        b = [(10, 10), (14, 10), (14, 14), (10, 14)]
+        self.assertFalse(_strict_convex_overlap(a, b))
+
     # -- position_valid -----------------------------------------------------
 
     def test_position_valid_no_nfps(self):
@@ -442,8 +463,7 @@ class TestNestingPacker(PathTestBase):
     def _assert_no_overlap(self, results, outlines):
         """Verify no two placed outlines have overlapping interiors.
 
-        Uses NFP: if the reference point of outline B lies strictly
-        inside NFP(placed_A, B), the two overlap.
+        Uses exact strict convex overlap test (edge/vertex touching allowed).
         """
         placed = []
         for idx, res in enumerate(results):
@@ -456,28 +476,9 @@ class TestNestingPacker(PathTestBase):
 
         for i in range(len(placed)):
             for j in range(i + 1, len(placed)):
-                nfp = _compute_nfp(placed[i], placed[j])
-                # placed[j]'s reference point is (0,0) of the original
-                # outline, which was translated to its position.
-                # For this check, compute barycentre of placed[j] and
-                # verify it's not strictly inside the NFP.
-                bx = sum(x for x, y in placed[j]) / len(placed[j])
-                by = sum(y for x, y in placed[j]) / len(placed[j])
-                # A simpler check: the bounding boxes should not have
-                # significant interior overlap.
-                bi = _polygon_bounds(placed[i])
-                bj = _polygon_bounds(placed[j])
-                ox = max(0, min(bi[2], bj[2]) - max(bi[0], bj[0]))
-                oy = max(0, min(bi[3], bj[3]) - max(bi[1], bj[1]))
-                overlap_area = ox * oy
-                ai = (bi[2] - bi[0]) * (bi[3] - bi[1])
-                aj = (bj[2] - bj[0]) * (bj[3] - bj[1])
-                min_area = min(ai, aj)
-                # Allow up to 5% overlap from bounding-box approximation.
-                self.assertTrue(
-                    overlap_area < min_area * 0.05 + 1e-6,
-                    "Parts %d and %d overlap (BB overlap %.2f vs min area %.2f)"
-                    % (i, j, overlap_area, min_area),
+                self.assertFalse(
+                    _strict_convex_overlap(placed[i], placed[j]),
+                    "Parts %d and %d overlap" % (i, j),
                 )
 
 
@@ -655,3 +656,89 @@ class TestNestingModels(PathTestBase):
                     check_y(mid_y),
                     "Bias %s: box1 Y midpoint %.2f unexpected" % (bias, mid_y),
                 )
+
+    def test_nest_global_up_axis_aligns_to_positive_z(self):
+        """A global up vector is rotated to +Z while staying inside stock."""
+        face0 = self.box1.Shape.Faces[0]
+        u0, u1, v0, v1 = face0.ParameterRange
+        source_normal = face0.normalAt((u0 + u1) / 2.0, (v0 + v1) / 2.0)
+        if face0.Orientation == "Reversed":
+            source_normal = FreeCAD.Vector() - source_normal
+
+        Nesting.nestModels(
+            self.job,
+            spacing=0.0,
+            allow_rotation=False,
+            global_up_vector=source_normal,
+        )
+        self.doc.recompute()
+
+        face = self.box1.Shape.Faces[0]
+        u0, u1, v0, v1 = face.ParameterRange
+        normal = face.normalAt((u0 + u1) / 2.0, (v0 + v1) / 2.0)
+        if face.Orientation == "Reversed":
+            normal = FreeCAD.Vector() - normal
+        normal.normalize()
+
+        self.assertRoughly(abs(normal.x), 0.0, 1e-4)
+        self.assertRoughly(abs(normal.y), 0.0, 1e-4)
+        self.assertTrue(normal.z > 0.999, "Expected +Z normal, got %s" % normal)
+
+        sbb = self.stock.Shape.BoundBox
+        bb = self.box1.Shape.BoundBox
+        self.assertTrue(bb.XMin >= sbb.XMin - 0.1)
+        self.assertTrue(bb.YMin >= sbb.YMin - 0.1)
+        self.assertTrue(bb.XMax <= sbb.XMax + 0.1)
+        self.assertTrue(bb.YMax <= sbb.YMax + 0.1)
+
+    def test_nest_global_up_axis_with_rotation_stays_inside_stock(self):
+        """Global up-axis with free rotation keeps all parts inside stock."""
+        Nesting.nestModels(
+            self.job,
+            spacing=0.0,
+            allow_rotation=True,
+            rotation_step=1.0,
+            global_up_vector=FreeCAD.Vector(0, 0, -1),
+        )
+        self.doc.recompute()
+
+        sbb = self.stock.Shape.BoundBox
+        for box in (self.box1, self.box2):
+            bb = box.Shape.BoundBox
+            self.assertTrue(
+                bb.XMin >= sbb.XMin - 0.1,
+                "%s extends past stock left" % box.Label,
+            )
+            self.assertTrue(
+                bb.YMin >= sbb.YMin - 0.1,
+                "%s extends past stock front" % box.Label,
+            )
+            self.assertTrue(
+                bb.XMax <= sbb.XMax + 0.1,
+                "%s extends past stock right" % box.Label,
+            )
+            self.assertTrue(
+                bb.YMax <= sbb.YMax + 0.1,
+                "%s extends past stock back" % box.Label,
+            )
+
+    def test_nest_global_up_axis_and_origin_mode(self):
+        """Global orientation keeps all parts inside stock."""
+        report = Nesting.nestModels(
+            self.job,
+            spacing=0.0,
+            allow_rotation=True,
+            rotation_step=90.0,
+            global_up_vector=FreeCAD.Vector(0, 0, -1),
+            global_origin_mode="stock_center",
+        )
+        self.assertIn("Placed 2 of 2", report)
+        self.doc.recompute()
+
+        sbb = self.stock.Shape.BoundBox
+        for box in (self.box1, self.box2):
+            bb = box.Shape.BoundBox
+            self.assertTrue(bb.XMin >= sbb.XMin - 0.1)
+            self.assertTrue(bb.YMin >= sbb.YMin - 0.1)
+            self.assertTrue(bb.XMax <= sbb.XMax + 0.1)
+            self.assertTrue(bb.YMax <= sbb.YMax + 0.1)

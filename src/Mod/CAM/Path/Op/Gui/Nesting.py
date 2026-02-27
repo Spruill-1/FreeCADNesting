@@ -91,6 +91,40 @@ def _classifySelection(sel, job):
     return job_objects, new_bodies
 
 
+def _firstSelectedFaceNormal(selection_ex):
+    """Return the first selected face normal as a unit FreeCAD.Vector."""
+    for item in selection_ex:
+        obj = getattr(item, "Object", None)
+        if obj is None:
+            continue
+        shape = getattr(obj, "Shape", None)
+        if shape is None or shape.isNull():
+            continue
+        for subname in getattr(item, "SubElementNames", []):
+            if not subname.startswith("Face"):
+                continue
+            try:
+                idx = int(subname[4:]) - 1
+            except ValueError:
+                continue
+            if idx < 0 or idx >= len(shape.Faces):
+                continue
+            face = shape.Faces[idx]
+            try:
+                u0, u1, v0, v1 = face.ParameterRange
+                normal = face.normalAt((u0 + u1) / 2.0, (v0 + v1) / 2.0)
+            except Exception:
+                normal = face.normalAt(0, 0)
+            if face.Orientation == "Reversed":
+                normal = FreeCAD.Vector() - normal
+            normal = obj.getGlobalPlacement().Rotation.multVec(normal)
+            if normal.Length <= 1e-9:
+                continue
+            normal.normalize()
+            return normal
+    return None
+
+
 # ---------------------------------------------------------------------------
 #   Task Panel
 # ---------------------------------------------------------------------------
@@ -108,6 +142,7 @@ class NestingTaskPanel:
     def __init__(self, job, new_bodies=None):
         self.job = job
         self.new_bodies = new_bodies or []
+        self._global_up_face_normal = None
         self._new_clone_map = {}  # original Name -> clone Name
         self._orig_placements = {}  # Name -> FreeCAD.Placement
         self._orig_map_modes = {}  # Name -> MapMode string
@@ -258,6 +293,53 @@ class NestingTaskPanel:
 
         layout.addWidget(grp_bias)
 
+        # --- Global orientation ------------------------------------------
+        grp_up = QtGui.QGroupBox(translate("CAM_Nesting", "Global Orientation"))
+        self.grpGlobalOrientation = grp_up
+        form_up = QtGui.QFormLayout(grp_up)
+
+        self.chkGlobalOrientation = QtGui.QCheckBox()
+        self.chkGlobalOrientation.setChecked(False)
+        self.chkGlobalOrientation.toggled.connect(
+            self._onGlobalOrientationToggled
+        )
+        form_up.addRow(
+            translate("CAM_Nesting", "Enable:"), self.chkGlobalOrientation
+        )
+
+        self.comboGlobalUp = QtGui.QComboBox()
+        self.comboGlobalUp.addItems([
+            "+Z", "-Z", "+X", "-X", "+Y", "-Y", translate("CAM_Nesting", "From Selected Face")
+        ])
+        self.comboGlobalUp.currentIndexChanged.connect(self._onSettingChanged)
+        form_up.addRow(
+            translate("CAM_Nesting", "Up axis:"), self.comboGlobalUp
+        )
+
+        self.comboGlobalOrigin = QtGui.QComboBox()
+        self.comboGlobalOrigin.addItems([
+            translate("CAM_Nesting", "Stock Min Corner"),
+            translate("CAM_Nesting", "Stock Center"),
+        ])
+        self.comboGlobalOrigin.currentIndexChanged.connect(self._onSettingChanged)
+        form_up.addRow(
+            translate("CAM_Nesting", "Origin:"), self.comboGlobalOrigin
+        )
+
+        self.btnUseFaceAsGlobalUp = QtGui.QPushButton(
+            translate("CAM_Nesting", "Use Selected Face")
+        )
+        self.btnUseFaceAsGlobalUp.clicked.connect(self._onUseFaceAsGlobalUp)
+        form_up.addRow("", self.btnUseFaceAsGlobalUp)
+
+        self.lblGlobalStatus = QtGui.QLabel(translate("CAM_Nesting", "Using +Z"))
+        self.lblGlobalStatus.setWordWrap(True)
+        form_up.addRow("", self.lblGlobalStatus)
+
+        self._onGlobalOrientationToggled(False)
+
+        layout.addWidget(grp_up)
+
         # --- Update button ------------------------------------------------
         self.btnUpdate = QtGui.QPushButton(
             translate("CAM_Nesting", "Update Preview")
@@ -273,6 +355,82 @@ class NestingTaskPanel:
 
         layout.addStretch()
         return widget
+
+    def _axisVectorFromMode(self):
+        mode = self.comboGlobalUp.currentText()
+        if mode == "+X":
+            return FreeCAD.Vector(1, 0, 0)
+        if mode == "-X":
+            return FreeCAD.Vector(-1, 0, 0)
+        if mode == "+Y":
+            return FreeCAD.Vector(0, 1, 0)
+        if mode == "-Y":
+            return FreeCAD.Vector(0, -1, 0)
+        if mode == "-Z":
+            return FreeCAD.Vector(0, 0, -1)
+        if mode == "+Z":
+            return FreeCAD.Vector(0, 0, 1)
+        return self._global_up_face_normal
+
+    def _globalOriginMode(self):
+        idx = self.comboGlobalOrigin.currentIndex()
+        if idx == 1:
+            return "stock_center"
+        return "stock_min"
+
+    def _onGlobalOrientationToggled(self, enabled):
+        self.comboGlobalUp.setEnabled(enabled)
+        self.comboGlobalOrigin.setEnabled(enabled)
+        self.btnUseFaceAsGlobalUp.setEnabled(enabled)
+        if enabled:
+            self.grpGlobalOrientation.setStyleSheet("")
+        else:
+            self.grpGlobalOrientation.setStyleSheet(
+                "QGroupBox { color: #8a8a8a; } "
+                "QLabel { color: #7a7a7a; }"
+            )
+        if enabled:
+            if self._global_up_face_normal is not None and self.comboGlobalUp.currentIndex() == 6:
+                self.lblGlobalStatus.setText(
+                    translate(
+                        "CAM_Nesting",
+                        "Using selected face normal (%.3f, %.3f, %.3f)",
+                    )
+                    % (
+                        self._global_up_face_normal.x,
+                        self._global_up_face_normal.y,
+                        self._global_up_face_normal.z,
+                    )
+                )
+            else:
+                self.lblGlobalStatus.setText(
+                    translate("CAM_Nesting", "Using %s")
+                    % self.comboGlobalUp.currentText()
+                )
+        else:
+            self.lblGlobalStatus.setText(
+                translate("CAM_Nesting", "Global orientation disabled")
+            )
+        self._onSettingChanged()
+
+    def _onUseFaceAsGlobalUp(self):
+        normal = _firstSelectedFaceNormal(FreeCADGui.Selection.getSelectionEx())
+        if normal is None:
+            self.lblGlobalStatus.setText(
+                translate("CAM_Nesting", "No face selected.")
+            )
+            return
+        self._global_up_face_normal = normal
+        self.comboGlobalUp.setCurrentIndex(6)
+        self.chkGlobalOrientation.setChecked(True)
+        self.lblGlobalStatus.setText(
+            translate(
+                "CAM_Nesting",
+                "Using selected face normal (%.3f, %.3f, %.3f)",
+            )
+            % (normal.x, normal.y, normal.z)
+        )
+        self._onUpdatePreview()
 
     # ----- Preview / nesting helpers --------------------------------------
 
@@ -329,6 +487,14 @@ class NestingTaskPanel:
     def _runNesting(self):
         """Execute nesting with current UI settings."""
         bias, gravity_point = self._getBiasParams()
+        global_up_vector = None
+        if self.chkGlobalOrientation.isChecked():
+            global_up_vector = self._axisVectorFromMode()
+            if global_up_vector is None:
+                self.lblGlobalStatus.setText(
+                    translate("CAM_Nesting", "Select a face for global up axis.")
+                )
+                return
         try:
             report = PathNesting.nestModels(
                 self.job,
@@ -338,6 +504,8 @@ class NestingTaskPanel:
                 bias=bias,
                 gravity_point=gravity_point,
                 edge_margin=self.spinEdgeMargin.value(),
+                global_up_vector=global_up_vector,
+                global_origin_mode=self._globalOriginMode(),
             )
             FreeCAD.Console.PrintMessage(report + "\n")
         except Exception as e:
@@ -348,6 +516,24 @@ class NestingTaskPanel:
 
     def _onSettingChanged(self, _value=None):
         """Auto-update preview when a packing parameter changes."""
+        if self.chkGlobalOrientation.isChecked():
+            if self.comboGlobalUp.currentIndex() == 6 and self._global_up_face_normal is not None:
+                self.lblGlobalStatus.setText(
+                    translate(
+                        "CAM_Nesting",
+                        "Using selected face normal (%.3f, %.3f, %.3f)",
+                    )
+                    % (
+                        self._global_up_face_normal.x,
+                        self._global_up_face_normal.y,
+                        self._global_up_face_normal.z,
+                    )
+                )
+            else:
+                self.lblGlobalStatus.setText(
+                    translate("CAM_Nesting", "Using %s")
+                    % self.comboGlobalUp.currentText()
+                )
         self._onUpdatePreview()
 
     def _onBiasChanged(self, index):
@@ -434,7 +620,17 @@ class CommandPathNesting:
         return False
 
     def Activated(self):
-        sel = FreeCADGui.Selection.getSelection()
+        sel_ex = FreeCADGui.Selection.getSelectionEx()
+        sel = []
+        seen = set()
+        for item in sel_ex:
+            obj = getattr(item, "Object", None)
+            if obj is None or obj.Name in seen:
+                continue
+            seen.add(obj.Name)
+            sel.append(obj)
+        if not sel:
+            sel = FreeCADGui.Selection.getSelection()
 
         # -- Find the active Job -------------------------------------------
         jobs = PathUtils.GetJobs()
