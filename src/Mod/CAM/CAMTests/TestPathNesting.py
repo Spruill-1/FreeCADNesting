@@ -373,6 +373,23 @@ class TestNestingPacker(PathTestBase):
         self.assertEqual(placed, 8)
         self._assert_no_overlap(results, [sq] * 8)
 
+    def test_pack_accepts_custom_order(self):
+        """Packer accepts a caller-provided placement order permutation."""
+        # Regression for the deterministic multi-start search: the low-level
+        # packer must accept externally computed orderings without mutating the
+        # returned placement indexing.
+        parts = [
+            [(0, 0), (7, 0), (7, 3), (0, 3)],
+            [(0, 0), (6, 0), (6, 4), (0, 4)],
+            [(0, 0), (5, 0), (5, 5), (0, 5)],
+        ]
+        packer = NFPPacker(30, 15, allow_rotation=False)
+        custom_order = [2, 0, 1]
+        results = packer.pack(parts, order=custom_order)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(r is not None for r in results))
+        self._assert_no_overlap(results, parts)
+
     # -- Rotation -----------------------------------------------------------
 
     def test_rotation_helps_fit(self):

@@ -242,7 +242,35 @@ class ObjectPocket(PathPocketBase.ObjectPocket):
                 if not ext.avoid:
                     wire = ext.getWire()
                     if wire:
-                        faces = ext.getExtensionFaces(wire)
+                        faces = None
+
+                        # Outline-only pockets need a slightly different extension
+                        # treatment than the generic preview strip shown in the
+                        # extensions task page.  Path.Area offsets the machining
+                        # boundary inward by the tool radius, so simply pocketing
+                        # the raw preview face can leave the toolpath short of the
+                        # intended extended boundary.  The outline-specific helper
+                        # builds an "all access" face that accounts for the parent
+                        # model and gives the pocket generator enough area to place
+                        # tool centerlines where the cutter edge still reaches the
+                        # requested extension.
+                        if obj.UseOutline and ext.feature.startswith("Face"):
+                            base_face = ext.obj.Shape.getElement(ext.feature)
+                            tol = 1e-4
+                            if hasattr(self.job, "GeometryTolerance"):
+                                tol = max(tol, self.job.GeometryTolerance.Value)
+                            outline_face = FeatureExtensions.getExtendOutlineFace(
+                                ext.obj.Shape,
+                                base_face,
+                                ext.length.Value,
+                                remHoles=True,
+                                offset_tolerance=tol,
+                            )
+                            if outline_face:
+                                faces = [outline_face]
+
+                        if faces is None:
+                            faces = ext.getExtensionFaces(wire)
                         for f in faces:
                             self.horiz.append(f)
                             self.exts.append(f)

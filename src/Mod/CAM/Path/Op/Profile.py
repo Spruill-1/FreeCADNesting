@@ -66,9 +66,10 @@ class ObjectProfile(PathAreaOp.ObjectOp):
         """initAreaOp(obj) ... creates all profile specific properties."""
         self.propertiesReady = False
         self.initAreaOpProperties(obj)
-
-        obj.setEditorMode("MiterLimit", 2)
-        obj.setEditorMode("JoinType", 2)
+        # Apply editor visibility immediately so newly-created Profile ops show
+        # the newly-exposed corner controls without waiting for a later change
+        # event.
+        self.setOpEditorProperties(obj)
 
     def initAreaOpProperties(self, obj, warn=False):
         """initAreaOpProperties(obj) ... create operation specific properties"""
@@ -341,11 +342,41 @@ class ObjectProfile(PathAreaOp.ObjectOp):
         if self.addNewProps and self.addNewProps.__len__() > 0:
             self.areaOpApplyPropertyDefaults(obj, job, self.addNewProps)
 
+    def _opPropertyValue(self, obj, name, default=None):
+        """Return an operation property value for real objects and setup prototypes.
+
+        Setup-sheet prototype objects store properties in a ``properties`` map
+        rather than exposing them as normal attributes.  Enumeration prototype
+        properties may temporarily hold their option list instead of a selected
+        value, so treat that state as "unset" and fall back to *default*.
+        """
+        props = getattr(obj, "properties", None)
+        if props and name in props:
+            value = props[name].getValue()
+            if value is None or isinstance(value, list):
+                return default
+            return value
+        return getattr(obj, name, default)
+
+    def _setEditorModeIfPresent(self, obj, name, mode):
+        """Set editor mode only when the property already exists on *obj*."""
+        props = getattr(obj, "properties", None)
+        if props and name not in props:
+            return
+        if props or hasattr(obj, name):
+            obj.setEditorMode(name, mode)
+
     def setOpEditorProperties(self, obj):
         """setOpEditorProperties(obj, porp) ... Process operation-specific changes to properties visibility."""
         fc = 2
-        # ml = 0 if obj.JoinType == 'Miter' else 2
-        side = 0 if obj.UseComp else 2
+        use_comp = bool(self._opPropertyValue(obj, "UseComp", True))
+        side = 0 if use_comp else 2
+        # ``JoinType`` is now user-visible because acute external corners may
+        # need ``Miter`` instead of the historical ``Round`` default.  The
+        # miter limit spinner only matters for that one mode.
+        join = 0
+        join_type = self._opPropertyValue(obj, "JoinType", "Round")
+        ml = 0 if join_type == "Miter" else 2
         opType = self._getOperationType(obj)
 
         if opType == "Contour":
@@ -355,20 +386,21 @@ class ObjectProfile(PathAreaOp.ObjectOp):
         elif opType == "Edge":
             pass
 
-        obj.setEditorMode("JoinType", 2)
-        obj.setEditorMode("MiterLimit", 2)  # ml
-        obj.setEditorMode("Side", side)
-        obj.setEditorMode("HandleMultipleFeatures", fc)
-        obj.setEditorMode("processCircles", fc)
-        obj.setEditorMode("processHoles", fc)
-        obj.setEditorMode("processPerimeter", fc)
+        self._setEditorModeIfPresent(obj, "JoinType", join)
+        self._setEditorModeIfPresent(obj, "MiterLimit", ml)
+        self._setEditorModeIfPresent(obj, "Side", side)
+        self._setEditorModeIfPresent(obj, "HandleMultipleFeatures", fc)
+        self._setEditorModeIfPresent(obj, "processCircles", fc)
+        self._setEditorModeIfPresent(obj, "processHoles", fc)
+        self._setEditorModeIfPresent(obj, "processPerimeter", fc)
 
     def _getOperationType(self, obj):
-        if len(obj.Base) == 0:
+        base = self._opPropertyValue(obj, "Base", []) or []
+        if len(base) == 0:
             return "Contour"
 
         # return first geometry type selected
-        (_, subsList) = obj.Base[0]
+        (_, subsList) = base[0]
         return subsList[0][:4]
 
     def areaOpOnDocumentRestored(self, obj):
@@ -1214,7 +1246,17 @@ class ObjectProfile(PathAreaOp.ObjectOp):
         if isHole is False:
             offset = 0 - offset
 
-        return PathUtils.getOffsetArea(fcShape, offset, plane=fcShape, tolerance=tolerance)
+        # Forward the corner-join settings into the shared offset helper so
+        # both closed-face and open-edge profile paths honor the same corner
+        # mode the user selected in the UI.
+        return PathUtils.getOffsetArea(
+            fcShape,
+            offset,
+            plane=fcShape,
+            tolerance=tolerance,
+            joinType=obj.JoinType,
+            miterLimit=obj.MiterLimit,
+        )
 
     def _findNearestVertex(self, shape, point):
         Path.Log.debug("_findNearestVertex()")

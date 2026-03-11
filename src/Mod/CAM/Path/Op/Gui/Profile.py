@@ -89,7 +89,10 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
         """getForm() ... returns UI customized according to profileFeatures()"""
         form = FreeCADGui.PySideUic.loadUi(":/panels/PageOpProfileFullEdit.ui")
 
-        comboToPropertyMap = [("cutSide", "Side"), ("direction", "Direction")]
+        # ``JoinType`` is populated from the same enumeration source as the
+        # existing Side/Direction combos so the task panel stays driven by the
+        # operation's canonical property metadata.
+        comboToPropertyMap = [("cutSide", "Side"), ("direction", "Direction"), ("joinType", "JoinType")]
         enumTups = PathProfile.ObjectProfile.areaOpPropertyEnumerations(dataType="raw")
 
         self.populateCombobox(form, enumTups, comboToPropertyMap)
@@ -104,9 +107,15 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
             obj.Side = str(self.form.cutSide.currentData())
         if obj.Direction != str(self.form.direction.currentData()):
             obj.Direction = str(self.form.direction.currentData())
+        if obj.JoinType != str(self.form.joinType.currentData()):
+            obj.JoinType = str(self.form.joinType.currentData())
         PathGuiUtil.updateInputField(obj, "OffsetExtra", self.form.extraOffset)
         obj.NumPasses = self.form.numPasses.value()
         PathGuiUtil.updateInputField(obj, "Stepover", self.form.stepover)
+        if obj.MiterLimit != self.form.miterLimit.value():
+            # ``MiterLimit`` is stored as a plain float property, so copy the
+            # spin-box value directly.
+            obj.MiterLimit = self.form.miterLimit.value()
 
         if obj.UseComp != self.form.useCompensation.isChecked():
             obj.UseComp = self.form.useCompensation.isChecked()
@@ -138,6 +147,7 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
 
         self.selectInComboBox(obj.Side, self.form.cutSide)
         self.selectInComboBox(obj.Direction, self.form.direction)
+        self.selectInComboBox(obj.JoinType, self.form.joinType)
         self.form.extraOffset.setText(
             FreeCAD.Units.Quantity(obj.OffsetExtra.Value, FreeCAD.Units.Length).UserString
         )
@@ -145,6 +155,7 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
         self.form.stepover.setText(
             FreeCAD.Units.Quantity(obj.Stepover.Value, FreeCAD.Units.Length).UserString
         )
+        self.form.miterLimit.setValue(obj.MiterLimit)
 
         self.form.useCompensation.setChecked(obj.UseComp)
         self.form.useStartPoint.setChecked(obj.UseStartPoint)
@@ -175,9 +186,11 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
         signals.append(self.form.coolantController.currentIndexChanged)
         signals.append(self.form.cutSide.currentIndexChanged)
         signals.append(self.form.direction.currentIndexChanged)
+        signals.append(self.form.joinType.currentIndexChanged)
         signals.append(self.form.extraOffset.editingFinished)
         signals.append(self.form.numPasses.editingFinished)
         signals.append(self.form.stepover.editingFinished)
+        signals.append(self.form.miterLimit.editingFinished)
         if hasattr(self.form.useCompensation, "checkStateChanged"):  # Qt version >= 6.7.0
             signals.append(self.form.useCompensation.checkStateChanged)
             signals.append(self.form.useStartPoint.checkStateChanged)
@@ -229,6 +242,11 @@ class TaskPanelOpPage(PathOpGui.TaskPanelPage):
             self.form.processPerimeter.hide()
 
         self.form.stepover.setEnabled(self.obj.NumPasses > 1)
+        # Only surface the limit control when the current corner mode can use
+        # it.  ``Round`` and ``Square`` ignore miter truncation completely.
+        useMiter = str(self.form.joinType.currentData()) == "Miter"
+        self.form.miterLimit.setVisible(useMiter)
+        self.form.miterLimitLabel.setVisible(useMiter)
 
         # Tab controls enabled/disabled based on UseTabs checkbox
         tabsEnabled = self.form.useTabs.isChecked()

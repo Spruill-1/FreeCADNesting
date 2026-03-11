@@ -246,10 +246,14 @@ class CAMWorkbench(Workbench):
                     import ocl  # pylint: disable=unused-variable
                 except ImportError:
                     import opencamlib as ocl
+                # Only expose OCL-backed 3D operations when OpenCamLib is
+                # actually importable.  ``Contour3D`` lives beside Surface and
+                # Waterline because it shares that 3D dependency boundary.
+                from Path.Op.Gui import Contour3D
                 from Path.Op.Gui import Surface
                 from Path.Op.Gui import Waterline
 
-                threedopcmdlist.extend(["CAM_Surface", "CAM_Waterline"])
+                threedopcmdlist.extend(["CAM_Surface", "CAM_Waterline", "CAM_Contour3D"])
                 threedcmdgroup = ["CAM_3dTools"]
                 FreeCADGui.addCommand(
                     "CAM_3dTools",

@@ -36,8 +36,11 @@ from Path.Tool.library.ui.dock import ToolBitLibraryDock
 import PathScripts.PathUtils as PathUtils
 import importlib
 from PySide.QtCore import QT_TRANSLATE_NOOP
+from lazy_loader.lazy_loader import LazyLoader
 
 from PySide import QtCore, QtGui, QtWidgets
+
+Part = LazyLoader("Part", globals(), "Part")
 
 __title__ = "CAM Operation UI base classes"
 __author__ = "sliptonic (Brad Collette)"
@@ -51,6 +54,110 @@ if False:
     Path.Log.trackModule(Path.Log.thisModule())
 else:
     Path.Log.setLevel(Path.Log.Level.INFO, Path.Log.thisModule())
+
+
+def _boundBoxesOverlap(bb1, bb2, tol=1e-7):
+    """Return True when two bound boxes overlap within *tol*."""
+    return not (
+        bb1.XMax < bb2.XMin - tol
+        or bb1.XMin > bb2.XMax + tol
+        or bb1.YMax < bb2.YMin - tol
+        or bb1.YMin > bb2.YMax + tol
+        or bb1.ZMax < bb2.ZMin - tol
+        or bb1.ZMin > bb2.ZMax + tol
+    )
+
+
+def _normalizedVector(vec, tol=1e-9):
+    """Return a normalized copy of *vec* or None if it is too small."""
+    length = vec.Length
+    if length <= tol:
+        return None
+    return FreeCAD.Vector(vec.x / length, vec.y / length, vec.z / length)
+
+
+def _planarFaceReference(face, planeTol=1e-6):
+    """Return `(normal, distance)` for a planar face or None for non-planar faces."""
+    if not isinstance(getattr(face, "Surface", None), Part.Plane):
+        return None
+
+    u0, u1, v0, v1 = face.ParameterRange
+    normal = _normalizedVector(face.normalAt((u0 + u1) * 0.5, (v0 + v1) * 0.5))
+    if normal is None:
+        return None
+
+    point = face.CenterOfMass
+    distance = normal.dot(point)
+    return (normal, distance, planeTol)
+
+
+def _faceMatchesPlane(face, planeRef, planeTol=1e-6, normalTol=1e-6):
+    """Return True when *face* lies on the same plane as *planeRef*."""
+    candidateRef = _planarFaceReference(face, planeTol)
+    if candidateRef is None:
+        return False
+
+    refNormal, refDistance, _ = planeRef
+    candNormal, _candDistance, _ = candidateRef
+
+    if abs(abs(refNormal.dot(candNormal)) - 1.0) > normalTol:
+        return False
+
+    return abs(refNormal.dot(face.CenterOfMass) - refDistance) <= planeTol
+
+
+def _iterFaceSubElements(shape):
+    """Yield `(subname, face)` pairs for every face in *shape*."""
+    for index, face in enumerate(shape.Faces, start=1):
+        yield (f"Face{index}", face)
+
+
+def _jobCoplanarFaceCandidates(job, selection, planeTol=1e-6, normalTol=1e-6):
+    """Expand selected planar faces to all coplanar job-model faces inside the stock."""
+    stockBB = None
+    if job and hasattr(job, "Stock") and getattr(job.Stock, "Shape", None):
+        stockBB = job.Stock.Shape.BoundBox
+
+    searchObjects = []
+    if job and hasattr(job, "Model") and hasattr(job.Model, "Group"):
+        searchObjects = list(job.Model.Group)
+    else:
+        searchObjects = [sel.Object for sel in selection if hasattr(sel, "Object")]
+
+    expanded = []
+    seen = set()
+
+    for sel in selection:
+        if not getattr(sel, "HasSubObjects", False):
+            continue
+
+        for subname, subobj in zip(sel.SubElementNames, sel.SubObjects):
+            if getattr(subobj, "ShapeType", None) != "Face":
+                continue
+
+            planeRef = _planarFaceReference(subobj, planeTol)
+            if planeRef is None:
+                continue
+
+            for candidateObj in searchObjects:
+                shape = getattr(candidateObj, "Shape", None)
+                if shape is None:
+                    continue
+                if stockBB and not _boundBoxesOverlap(shape.BoundBox, stockBB, planeTol):
+                    continue
+
+                for candidateSub, candidateFace in _iterFaceSubElements(shape):
+                    if stockBB and not _boundBoxesOverlap(candidateFace.BoundBox, stockBB, planeTol):
+                        continue
+                    if not _faceMatchesPlane(candidateFace, planeRef, planeTol, normalTol):
+                        continue
+
+                    key = (getattr(candidateObj, "Name", id(candidateObj)), candidateSub)
+                    if key not in seen:
+                        seen.add(key)
+                        expanded.append((candidateObj, candidateSub))
+
+    return expanded
 
 
 class ViewProvider(object):
@@ -683,19 +790,46 @@ class TaskPanelBaseGeometryPage(TaskPanelPage):
                 return False
         return True
 
+    def _baseEntryCount(self):
+        base = getattr(self.obj, "Base", None) or []
+        return sum(len(subs) for _, subs in base)
+
+    def _addBaseEntries(self, entries):
+        added = False
+        for base, sub in entries:
+            before = self._baseEntryCount()
+            self.obj.Proxy.addBase(self.obj, base, sub)
+            if self._baseEntryCount() > before:
+                added = True
+        return added
+
     def addBaseGeometry(self, selection):
         Path.Log.track(selection)
+        entries = []
         for sel in selection:
             # check each selection
             if self.selectionSupportedAsBaseGeometry(sel, False):
                 for sub in sel.SubElementNames:
-                    self.obj.Proxy.addBase(self.obj, sel.Object, sub)
-        return False
+                    entries.append((sel.Object, sub))
+        return self._addBaseEntries(entries)
 
     def addBase(self):
         Path.Log.track()
         if self.addBaseGeometry(FreeCADGui.Selection.getSelectionEx()):
             # self.obj.Proxy.execute(self.obj)
+            self.setFields(self.obj)
+            self.setDirty()
+            self.updatePanelVisibility("Operation", self.obj)
+
+    def addCoplanarBase(self):
+        """Expand selected planar faces to all coplanar faces inside the stock."""
+        Path.Log.track()
+        tol = 0.001
+        if hasattr(self.job, "GeometryTolerance"):
+            tol = max(tol, self.job.GeometryTolerance.Value)
+
+        entries = _jobCoplanarFaceCandidates(self.job, FreeCADGui.Selection.getSelectionEx(), tol, 1e-6)
+        if self._addBaseEntries(entries):
             self.setFields(self.obj)
             self.setDirty()
             self.updatePanelVisibility("Operation", self.obj)
@@ -743,6 +877,8 @@ class TaskPanelBaseGeometryPage(TaskPanelPage):
     def registerSignalHandlers(self, obj):
         self.form.baseList.itemSelectionChanged.connect(self.itemActivated)
         self.form.addBase.clicked.connect(self.addBase)
+        if hasattr(self.form, "addCoplanarBase"):
+            self.form.addCoplanarBase.clicked.connect(self.addCoplanarBase)
         self.form.deleteBase.clicked.connect(self.deleteBase)
         self.form.clearBase.clicked.connect(self.clearBase)
         self.form.geometryImportButton.clicked.connect(self.importBaseGeometry)
@@ -752,11 +888,18 @@ class TaskPanelBaseGeometryPage(TaskPanelPage):
             self.setFields(obj)
 
     def updateSelection(self, obj, selection):
-        for sel in selection:
-            if self.selectionSupportedAsBaseGeometry(sel, True):
-                self.form.addBase.setEnabled(True)
-            else:
-                self.form.addBase.setEnabled(False)
+        supported = any(self.selectionSupportedAsBaseGeometry(sel, True) for sel in selection)
+        self.form.addBase.setEnabled(supported)
+
+        if hasattr(self.form, "addCoplanarBase"):
+            coplanarSupported = False
+            if self.supportsFaces():
+                coplanarSupported = any(
+                    getattr(sel, "HasSubObjects", False)
+                    and any(getattr(sub, "ShapeType", None) == "Face" for sub in sel.SubObjects)
+                    for sel in selection
+                )
+            self.form.addCoplanarBase.setEnabled(coplanarSupported)
 
     def resizeBaseList(self):
         # Set base geometry list window to resize based on contents

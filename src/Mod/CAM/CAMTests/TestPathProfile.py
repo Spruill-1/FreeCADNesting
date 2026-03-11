@@ -108,6 +108,18 @@ class TestPathProfile(PathTestBase):
         """test00() Empty test."""
         return
 
+    def test_join_type_params_are_propagated(self):
+        # Regression for sharp-corner support: the Profile op must forward the
+        # selected corner mode and miter limit into the path-area parameters
+        # consumed by offset generation.
+        self.prototype.JoinType = "Miter"
+        self.prototype.MiterLimit = 3.25
+
+        params = self.prototype.Proxy.areaOpAreaParams(self.prototype, False)
+
+        self.assertEqual(params["JoinType"], 2)
+        self.assertEqual(params["MiterLimit"], 3.25)
+
     def test01(self):
         """test01() Verify path generated on Face18, outside, with tool compensation."""
 

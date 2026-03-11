@@ -370,6 +370,10 @@ def turnselect():
 def select(op):
     opsel = {}
     opsel["Contour"] = contourselect  # deprecated
+    # ``Contour3D`` is a face-driven finishing op, so it uses the same
+    # face/mesh-aware selection gate family as the existing OCL-backed 3D
+    # surface operations.
+    opsel["Contour3D"] = surfaceselect
     opsel["Deburr"] = chamferselect
     opsel["Drilling"] = drillselect
     opsel["Tapping"] = tapselect

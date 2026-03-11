@@ -35,6 +35,7 @@ independently of the FreeCAD object model.
 """
 
 import math
+import random
 
 import FreeCAD
 import Part
@@ -680,7 +681,7 @@ class NFPPacker:
 
     # -- public API ---------------------------------------------------------
 
-    def pack(self, outlines):
+    def pack(self, outlines, order=None):
         """Pack convex *outlines* into the stock.
 
         Parameters
@@ -689,6 +690,12 @@ class NFPPacker:
             Each polygon is ``[(x, y), ...]`` CCW, in the model's local
             frame (origin = model's local origin, already offset by
             ``spacing / 2`` if desired).
+        order : list[int] | None
+            Optional explicit placement order (indices into *outlines*).
+            When omitted, parts are placed by descending area.  This is
+            mainly used by the multi-start search in ``nestModels()``,
+            which explores several deterministic permutations and keeps
+            the best overall layout.
 
         Returns
         -------
@@ -698,11 +705,18 @@ class NFPPacker:
             translation applied to the outline's reference point (its
             local origin) so that the part sits inside the stock.
         """
-        # Sort by descending area for better packing — place big parts first.
-        areas = []
-        for poly in outlines:
-            areas.append(abs(_polygon_area_signed(poly)))
-        indexed = sorted(range(len(outlines)), key=lambda i: -areas[i])
+        if order is None:
+            # Sort by descending area for better packing — place big parts first.
+            areas = []
+            for poly in outlines:
+                areas.append(abs(_polygon_area_signed(poly)))
+            indexed = sorted(range(len(outlines)), key=lambda i: -areas[i])
+        else:
+            indexed = list(order)
+            if len(indexed) != len(outlines):
+                raise ValueError("order must contain one index per outline")
+            if set(indexed) != set(range(len(outlines))):
+                raise ValueError("order must be a permutation of outline indices")
 
         results = [None] * len(outlines)
 
@@ -1282,7 +1296,114 @@ def nestModels(job, spacing=2.0, allow_rotation=True,
         bias=bias,
         gravity_point=gravity_point,
     )
-    results = packer.pack(outlines)
+
+    def _packing_metrics(result_list):
+        # Score candidate layouts by a lexicographic tuple:
+        #   1) maximize placed part count,
+        #   2) minimize used envelope area,
+        #   3) minimize used envelope height,
+        #   4) minimize used envelope width.
+        #
+        # The height/width tie-breakers bias the result toward shallower,
+        # more machinist-friendly layouts instead of arbitrarily wide ones.
+        placed_idxs = [i for i, r in enumerate(result_list) if r is not None]
+        placed_count = len(placed_idxs)
+        if placed_count == 0:
+            return (0, float("inf"), float("inf"), float("inf"))
+
+        uminx = float("inf")
+        uminy = float("inf")
+        umaxx = float("-inf")
+        umaxy = float("-inf")
+        for i in placed_idxs:
+            px, py, angle = result_list[i]
+            poly = _translate_polygon(_rotate_polygon(outlines[i], angle), px, py)
+            bx0, by0, bx1, by1 = _polygon_bounds(poly)
+            uminx = min(uminx, bx0)
+            uminy = min(uminy, by0)
+            umaxx = max(umaxx, bx1)
+            umaxy = max(umaxy, by1)
+
+        used_w = umaxx - uminx
+        used_h = umaxy - uminy
+        used_area = used_w * used_h
+        # More placed is better; then tighter / shallower envelope.
+        return (-placed_count, used_area, used_h, used_w)
+
+    n_parts = len(outlines)
+    part_areas = [abs(_polygon_area_signed(p)) for p in outlines]
+    part_bounds = [_polygon_bounds(p) for p in outlines]
+    part_max_dim = [max(b[2] - b[0], b[3] - b[1]) for b in part_bounds]
+
+    order_candidates = []
+
+    def _add_order(seq):
+        t = tuple(seq)
+        if len(t) != n_parts:
+            return
+        if set(t) != set(range(n_parts)):
+            return
+        if t not in order_candidates:
+            order_candidates.append(t)
+
+    # Baseline and deterministic alternative orders.
+    #
+    # Different outline orders can materially change a greedy NFP packing
+    # result.  Rather than introducing randomness, we try a fixed menu of
+    # plausible heuristics so results stay reproducible and testable.
+    area_desc = sorted(range(n_parts), key=lambda i: -part_areas[i])
+    _add_order(area_desc)
+    _add_order(sorted(range(n_parts), key=lambda i: part_areas[i]))
+    _add_order(sorted(range(n_parts), key=lambda i: -part_max_dim[i]))
+    _add_order(sorted(range(n_parts), key=lambda i: part_max_dim[i]))
+
+    # Large/small zipper sequence can improve packability for mixed sets by
+    # preventing early passes from consuming all of the "easy" large open
+    # space with similarly-sized parts.
+    zipper = []
+    lo = 0
+    hi = len(area_desc) - 1
+    take_hi = True
+    while lo <= hi:
+        if take_hi:
+            zipper.append(area_desc[hi])
+            hi -= 1
+        else:
+            zipper.append(area_desc[lo])
+            lo += 1
+        take_hi = not take_hi
+    _add_order(zipper)
+
+    # Deterministic shuffled starts for global rearrangement search.
+    #
+    # These give the solver a few additional globally different entry points
+    # without making the outcome non-reproducible between runs.
+    for seed in (7, 19, 41):
+        seq = list(range(n_parts))
+        random.Random(seed).shuffle(seq)
+        _add_order(seq)
+
+    best_results = None
+    best_metrics = None
+    for order in order_candidates:
+        # Recreate the packer for each trial so no cached placed geometry or
+        # gravity-shift state leaks from one ordering experiment into the next.
+        trial_packer = NFPPacker(
+            packer_w,
+            packer_h,
+            spacing=0.0,
+            allow_rotation=bool(allow_rotation),
+            rotation_step=rot_step,
+            bias=bias,
+            gravity_point=gravity_point,
+        )
+        trial_results = trial_packer.pack(outlines, order=list(order))
+        metrics = _packing_metrics(trial_results)
+        if best_metrics is None or metrics < best_metrics:
+            best_metrics = metrics
+            best_results = trial_results
+
+    results = best_results if best_results is not None else packer.pack(outlines)
 
     # ------------------------------------------------------------------
     # Apply placements

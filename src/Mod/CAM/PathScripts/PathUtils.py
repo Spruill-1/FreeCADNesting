@@ -404,6 +404,8 @@ def getOffsetArea(
     # Default: XY plane
     plane=Part.makeCircle(10),
     tolerance=1e-4,
+    joinType=None,
+    miterLimit=None,
 ):
     """Make an offset area of a shape, projected onto a plane.
     Positive offsets expand the area, negative offsets shrink it.
@@ -428,6 +430,18 @@ def getOffsetArea(
     areaParams["Tolerance"] = 1e-5  # Equal point tolerance
     areaParams["Simplify"] = True
     areaParams["CleanDistance"] = tolerance / 5
+
+    if joinType is not None:
+        # Allow callers to pass either the human-readable Profile literal or
+        # the integer enum value expected by ``Path.Area``.
+        if isinstance(joinType, str):
+            join_map = {"Round": 0, "Square": 1, "Miter": 2}
+            joinType = join_map.get(joinType, joinType)
+        areaParams["JoinType"] = joinType
+        # ``MiterLimit`` is only meaningful for miter joins; other join modes
+        # intentionally ignore it.
+        if joinType == 2 and miterLimit is not None:
+            areaParams["MiterLimit"] = miterLimit
 
     area = Path.Area()  # Create instance of Area() class object
     # Set working plane normal to Z=1

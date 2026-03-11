@@ -159,6 +159,54 @@
         </property>
        </widget>
       </item>
+       <!-- Corner controls were added so Profile users can choose how sharp
+         offset corners should be. ``Miter`` is the mode intended for very
+         fine external points that would otherwise be softened by rounding. -->
+      <item row="5" column="0">
+       <widget class="QLabel" name="joinTypeLabel">
+        <property name="text">
+         <string>Corner mode</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QComboBox" name="joinType">
+        <property name="toolTip">
+         <string>Controls how the offset toolpath behaves at corners. Use Miter for the sharpest points.</string>
+        </property>
+        <item>
+         <property name="text">
+          <string>PLACEHOLDER</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="miterLimitLabel">
+        <property name="text">
+         <string>Miter limit</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QDoubleSpinBox" name="miterLimit">
+        <property name="decimals">
+         <number>3</number>
+        </property>
+        <property name="minimum">
+         <double>0.001000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>1000.000000000000000</double>
+        </property>
+        <property name="singleStep">
+         <double>0.100000000000000</double>
+        </property>
+        <property name="toolTip">
+         <string>Maximum distance before a miter corner is truncated.</string>
+        </property>
+       </widget>
+      </item>
       </layout>
     </widget>
    </item>
